@@ -1,0 +1,9 @@
+.git
+.github
+.env
+spike
+docs
+HANDOFF.md
+TODO.md
+*.md
+!README.md
