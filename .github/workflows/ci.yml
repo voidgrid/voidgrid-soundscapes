@@ -1,19 +1,21 @@
-name: CI
+name: ci
 
+# The image build runs gofmt, go vet and go test (see the Dockerfile), so building it is the test run.
+# Then the image is booted the way it is meant to run and checked for health.
 on:
   push:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version-file: go.mod
-      - name: gofmt
-        run: test -z "$(gofmt -l cmd internal)"
-      - run: go vet ./...
-      - run: go test -race ./...
+      - uses: actions/checkout@v7
+      - name: Build (format, vet and tests run inside)
+        run: docker build --build-arg VERSION=ci -t voidgrid-soundscapes:ci .
+      - name: Smoke test
+        run: scripts/smoke.sh voidgrid-soundscapes:ci

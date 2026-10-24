@@ -60,7 +60,20 @@ You need Go 1.22 or newer, or just Docker.
 - `go vet ./... && go test -race ./...` builds, vets and tests everything.
 - `gofmt -l cmd internal` must print nothing.
 - `docker build -t voidgrid-soundscapes:dev .` builds the image (Go 1.27 builder, Alpine runtime with ffmpeg).
-- CI runs formatting, vet and the tests, and builds and pushes the image to `ghcr.io` from `main`.
+- `scripts/smoke.sh <image>` boots an image the way it is meant to run (uid 1000, all capabilities dropped, read-only root) and checks it is healthy and that ffmpeg has the MP3 encoder.
+- The image build runs `gofmt`, `go vet` and `go test`, so a failing test fails the build. CI (on every push to `main` and every pull request) is just that build plus the smoke test.
+
+### Releases
+
+Pushing a `v*` tag builds the image, runs the smoke test and pushes it to `ghcr.io/voidgrid/voidgrid-soundscapes` for linux/amd64:
+
+```sh
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:latest         # newest stable release
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:beta           # newest release of any kind, pre-releases included
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0-beta.1  # one exact version, never moves
+```
+
+A hyphen in the tag marks a pre-release: `v0.1.0-beta.1` moves only `:beta`, while `v0.1.0` moves `:latest` and `:beta`. Versioned tags never move. The image is Alpine with ffmpeg; the Go binary is static and will embed the web UI.
 
 ## Acknowledgement
 
