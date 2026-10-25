@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/config"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/server"
 )
 
@@ -35,7 +36,19 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := server.Run(ctx, cfg.Listen, server.New(), log); err != nil {
+	lib := library.New(cfg.AudioDir, nil, log)
+	go lib.Run(ctx, cfg.ScanInterval, func(d library.Diff) {
+		layers := lib.Layers()
+		bad := 0
+		for _, l := range layers {
+			if !l.Playable() {
+				bad++
+			}
+		}
+		log.Info("library changed", "added", len(d.Added), "removed", len(d.Removed), "changed", len(d.Changed), "total", len(layers), "unusable", bad)
+	})
+
+	if err := server.Run(ctx, cfg.Listen, server.New(lib), log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}

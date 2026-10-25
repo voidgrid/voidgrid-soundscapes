@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 )
 
 const prefix = "VOIDGRID_SOUNDSCAPES_"
@@ -15,6 +16,8 @@ type Config struct {
 	AudioDir  string // root of the audio library
 	ConfigDir string // where soundscapes and settings are stored
 	LogLevel  string // debug, info, warn or error
+
+	ScanInterval time.Duration // how often the audio directory is rescanned
 }
 
 // Load reads the configuration from the process environment.
@@ -35,6 +38,11 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		ConfigDir: get("CONFIG_DIR", "/soundscapes/config"),
 		LogLevel:  get("LOG_LEVEL", "info"),
 	}
+	d, err := time.ParseDuration(get("SCAN_INTERVAL", "10s"))
+	if err != nil || d < time.Second {
+		return Config{}, fmt.Errorf("%sSCAN_INTERVAL: must be a duration of at least 1s, such as 10s or 1m", prefix)
+	}
+	c.ScanInterval = d
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:

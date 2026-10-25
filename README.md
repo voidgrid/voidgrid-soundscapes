@@ -50,6 +50,16 @@ Settings are environment variables:
 | `VOIDGRID_SOUNDSCAPES_AUDIO_DIR` | `/soundscapes/audio` | Root of your audio library |
 | `VOIDGRID_SOUNDSCAPES_CONFIG_DIR` | `/soundscapes/config` | Where soundscapes and settings are stored |
 | `VOIDGRID_SOUNDSCAPES_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
+| `VOIDGRID_SOUNDSCAPES_SCAN_INTERVAL` | `10s` | How often the audio directory is rescanned for new, changed or removed files (at least `1s`) |
+
+### Your audio folder
+
+Put audio files anywhere under the audio directory. Each file is a **layer**, identified by its path inside that directory (`rain/heavy.mp3`), so two files called `heavy.mp3` in different folders are two different layers. The first-level folder is the layer's category (`rain`), which the UI will use to group them; files directly in the root have no category.
+
+- Recognised extensions: `mp3 wav flac ogg oga opus m4a aac wma aif aiff`. Every file is checked with `ffprobe`; one that is not really audio is listed with an error and never mixed.
+- Hidden files and folders (names starting with `.`) and anything else are ignored. A symlink to a file counts; a symlink to a folder is not followed.
+- New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
+- `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
 
 The container has a health check (`voidgrid-soundscapes healthcheck`), and invalid settings make it exit with code 2 and say which one.
 

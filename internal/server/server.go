@@ -3,15 +3,34 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"time"
+
+	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
 )
 
+// Layers lists the audio files that can be mixed.
+type Layers interface {
+	Layers() []library.Layer
+}
+
 // New returns the HTTP handler. Health reports only that the process is serving.
-func New() http.Handler {
+func New(lib Layers) http.Handler {
 	mux := http.NewServeMux()
+	mux.HandleFunc("/api/layers", func(w http.ResponseWriter, r *http.Request) {
+		layers := lib.Layers()
+		if layers == nil {
+			layers = []library.Layer{} // encode as [], not null
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "no-store")
+		_ = json.NewEncoder(w).Encode(struct {
+			Layers []library.Layer `json:"layers"`
+		}{layers})
+	})
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte("ok\n"))
