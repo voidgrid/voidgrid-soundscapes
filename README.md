@@ -51,15 +51,35 @@ Settings are environment variables:
 | `VOIDGRID_SOUNDSCAPES_CONFIG_DIR` | `/soundscapes/config` | Where soundscapes and settings are stored |
 | `VOIDGRID_SOUNDSCAPES_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `VOIDGRID_SOUNDSCAPES_SCAN_INTERVAL` | `10s` | How often the audio directory is rescanned for new, changed or removed files (at least `1s`) |
+| `VOIDGRID_SOUNDSCAPES_LOOP_CROSSFADE` | `1500ms` | Length of the crossfade that joins the end of a layer's audio to its start when it loops (`0s` to `10s`; `0s` is a hard cut) |
 
 ### Your audio folder
 
 Put audio files anywhere under the audio directory. Each file is a **layer**, identified by its path inside that directory (`rain/heavy.mp3`), so two files called `heavy.mp3` in different folders are two different layers. The first-level folder is the layer's category (`rain`), which the UI will use to group them; files directly in the root have no category.
 
-- Recognised extensions: `mp3 wav flac ogg oga opus m4a aac wma aif aiff`. Every file is checked with `ffprobe`; one that is not really audio is listed with an error and never mixed.
+- Recognised extensions: `mp3 wav flac ogg oga opus m4a aac wma aif aiff webm mp4`. Every file is checked with `ffprobe`; one that is not really audio is listed with an error and never mixed. `webm` and `mp4` may carry video: only the audio track is used, and a file with no audio track is reported as unusable. The tests build a tone in each of these formats and check it comes out of the stream at the right pitch, in the same Alpine ffmpeg the image ships.
 - Hidden files and folders (names starting with `.`) and anything else are ignored. A symlink to a file counts; a symlink to a folder is not followed.
 - New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
 - `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
+
+### Soundscapes and streaming
+
+A soundscape is a named mix of layers, each with a level from 0 to 1 and an on/off switch. Define one by sending the whole mix; sending it again is harmless, and you can send it while someone is listening to hear the change live:
+
+```sh
+curl -X PUT http://localhost:8007/api/soundscapes/night -d '{"layers": [
+  {"id": "rain/heavy.mp3",  "level": 0.6, "enabled": true},
+  {"id": "waves/gentle.flac", "level": 0.3, "enabled": true}
+]}'
+```
+
+The reply lists each layer's state: `ready`, `loading` (being decoded; silent until it is ready), `off`, `missing` (not in the library), `unusable` or `error`. One bad layer never stops the others. Then point any player at `http://<host>:8007/stream/night` (MP3, 128 kbit/s). `GET /api/soundscapes` and `GET /api/soundscapes/night` show the state, including how many listeners there are.
+
+- **Shared work:** each file is decoded once, however many soundscapes use it, and each soundscape is mixed and encoded once however many players listen. The encoder runs only while somebody is listening and stops a few seconds after the last listener leaves.
+- **Live changes:** level changes and switching layers on or off ramp over 50 ms, so they never click. In a test with real files and the real encoder, a change reached the stream's output about 200 ms after the request. A player then adds its own buffer, which this cannot control. The one exception is a layer that is not in memory yet: switching it on is silent until it has been decoded (a fraction of a second for short files, about a second for a long recording on a busy machine), and its state reads `loading` meanwhile. A layer you switch off is dropped from memory a couple of minutes later.
+- **Loops:** every layer loops forever and independently. Silence at the start and end of a file is trimmed, and the end is crossfaded into the start. If the start and end of the audio are clearly alike (a hum, a fan, a drone), the join is moved to where they line up and the fade is linear, so they do not cancel or swell; for noise-like sounds such as rain it is an equal-power fade. Try `LOOP_CROSSFADE` if a join is audible on your recordings.
+- **Limits:** a layer longer than 20 minutes is refused. Loud mixes are eased towards full scale instead of being clipped.
+- **Not saved yet:** soundscapes live in memory and are lost when the container restarts. Saving them comes next.
 
 The container has a health check (`voidgrid-soundscapes healthcheck`), and invalid settings make it exit with code 2 and say which one.
 

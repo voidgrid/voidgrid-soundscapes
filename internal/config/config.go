@@ -17,7 +17,8 @@ type Config struct {
 	ConfigDir string // where soundscapes and settings are stored
 	LogLevel  string // debug, info, warn or error
 
-	ScanInterval time.Duration // how often the audio directory is rescanned
+	ScanInterval  time.Duration // how often the audio directory is rescanned
+	LoopCrossfade time.Duration // crossfade that joins the end of a layer's audio to its start
 }
 
 // Load reads the configuration from the process environment.
@@ -43,6 +44,11 @@ func load(lookup func(string) (string, bool)) (Config, error) {
 		return Config{}, fmt.Errorf("%sSCAN_INTERVAL: must be a duration of at least 1s, such as 10s or 1m", prefix)
 	}
 	c.ScanInterval = d
+	x, err := time.ParseDuration(get("LOOP_CROSSFADE", "1500ms"))
+	if err != nil || x < 0 || x > 10*time.Second {
+		return Config{}, fmt.Errorf("%sLOOP_CROSSFADE: must be a duration from 0 to 10s, such as 1500ms", prefix)
+	}
+	c.LoopCrossfade = x
 	switch c.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:

@@ -25,6 +25,9 @@ import (
 var extensions = map[string]bool{
 	".mp3": true, ".wav": true, ".flac": true, ".ogg": true, ".oga": true, ".opus": true,
 	".m4a": true, ".aac": true, ".wma": true, ".aif": true, ".aiff": true,
+	// Video containers are accepted for their audio track; the video is ignored. A file with no audio track
+	// is reported as unusable.
+	".webm": true, ".mp4": true,
 }
 
 const (

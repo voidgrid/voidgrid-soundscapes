@@ -10,6 +10,7 @@ import (
 	"syscall"
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/config"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/server"
 )
@@ -48,7 +49,11 @@ func main() {
 		log.Info("library changed", "added", len(d.Added), "removed", len(d.Removed), "changed", len(d.Changed), "total", len(layers), "unusable", bad)
 	})
 
-	if err := server.Run(ctx, cfg.Listen, server.New(lib), log); err != nil {
+	eng := engine.New(ctx, lib, engine.Options{
+		Loop: engine.LoopOptions{Crossfade: cfg.LoopCrossfade, SilenceThreshold: engine.DefaultLoopOptions.SilenceThreshold},
+	}, log)
+
+	if err := server.Run(ctx, cfg.Listen, server.New(lib, eng), log); err != nil {
 		log.Error("server stopped", "err", err)
 		os.Exit(1)
 	}
