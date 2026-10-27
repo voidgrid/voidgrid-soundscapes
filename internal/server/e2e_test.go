@@ -18,6 +18,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
 func goertzel(pcm []int16, freq float64) float64 {
@@ -105,7 +106,12 @@ func TestRealStreamLiveMixing(t *testing.T) {
 	defer cancel()
 	eng := engine.New(ctx, lib, engine.Options{Loop: engine.LoopOptions{Crossfade: 500 * time.Millisecond, SilenceThreshold: 8}},
 		slog.New(slog.NewTextHandler(nopWriter{}, nil)))
-	ts := httptest.NewServer(New(lib, eng))
+	st, err := store.Open(t.TempDir(), 0, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ts := httptest.NewServer(New(lib, eng, st))
 	defer ts.Close()
 
 	type tone struct {

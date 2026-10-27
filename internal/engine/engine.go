@@ -30,6 +30,9 @@ type Options struct {
 // ErrUnknown is returned for a soundscape that has not been defined.
 var ErrUnknown = errors.New("unknown soundscape")
 
+// ErrRemoved is the reason a listener is cut off when its soundscape is deleted.
+var ErrRemoved = errors.New("soundscape removed")
+
 var idPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`)
 
 // ValidID reports whether id is acceptable as a soundscape ID (it appears in a URL).
@@ -83,6 +86,20 @@ func (e *Engine) Apply(id string, spec Spec) (Status, error) {
 	}
 	e.mu.Unlock()
 	return m.Apply(spec), nil
+}
+
+// Remove deletes a soundscape: its listeners are cut off, its stream stops and its layers are released.
+// It reports whether the soundscape existed.
+func (e *Engine) Remove(id string) bool {
+	e.mu.Lock()
+	m := e.mixes[id]
+	delete(e.mixes, id)
+	e.mu.Unlock()
+	if m == nil {
+		return false
+	}
+	m.close()
+	return true
 }
 
 // Status returns one soundscape's state.

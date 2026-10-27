@@ -515,6 +515,43 @@ func TestShutdownEndsStreams(t *testing.T) {
 	}
 }
 
+func TestRemoveStopsTheStreamCutsListenersAndFreesTheLayers(t *testing.T) {
+	fx := newFixture(t, "rain.mp3")
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	apply(t, fx.e, "other", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	l, _ := fx.e.Subscribe("mix")
+	<-l.C
+	m := fx.e.mixes["mix"]
+
+	if !fx.e.Remove("mix") || fx.e.Remove("mix") {
+		t.Fatal("Remove should report whether the soundscape existed")
+	}
+	select {
+	case <-l.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("the listener was not cut off")
+	}
+	if !errors.Is(l.Err(), ErrRemoved) {
+		t.Fatalf("listener ended with %v, want ErrRemoved", l.Err())
+	}
+	eventually(t, "the encoder to stop", func() bool { return fx.enc.stops.Load() == 1 })
+	if _, ok := fx.e.Status("mix"); ok {
+		t.Fatal("the soundscape still exists")
+	}
+	if _, err := fx.e.Subscribe("mix"); !errors.Is(err, ErrUnknown) {
+		t.Fatalf("Subscribe after Remove = %v, want ErrUnknown", err)
+	}
+	// (The mixer may still list a layer: it drops faded-out layers while rendering, which has stopped.
+	// Nothing holds the audio, and the unreferenced Mix is collected.)
+	if len(m.held) != 0 {
+		t.Fatalf("the removed soundscape still holds %d layers", len(m.held))
+	}
+	if st, ok := fx.e.Status("other"); !ok || st.Layers[0].State != StateReady && st.Layers[0].State != StateLoading {
+		t.Fatalf("another soundscape was disturbed: %+v", st)
+	}
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true}) // the ID can be reused
+}
+
 func TestIDsAndUnknownSoundscapes(t *testing.T) {
 	fx := newFixture(t)
 	for _, bad := range []string{"", "../x", "a/b", "with space", ".hidden", strings.Repeat("a", 65), "ünï"} {

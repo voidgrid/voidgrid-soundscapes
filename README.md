@@ -6,7 +6,7 @@ I want to have rain, waves, or anything else I want to fall asleep to, and be ab
 
 I wrote this using Claude. The design is mine (what a soundscape is, how folders work, how Home Assistant fits in, what V1 includes and leaves out); a lot of the code is Claude's. I'm also learning Go as I go, and I'll be reading all of the code, over time, after it has been written here. Until I have, don't take my word for it that the code is good: read it before you trust it, especially if it is going anywhere near a speaker in a room where someone is asleep. It is a one person plus AI project and I would rather be upfront about that than have you find out later.
 
-It is also very early. **Right now it does almost nothing.** The real program starts, logs, serves a health check and stops cleanly. The mixing has been proven in a throwaway prototype (a few files looped and mixed with live level changes, played on a real speaker through Home Assistant and Music Assistant), but that code is not in this repository yet. There is no release and no published image.
+It is also very early. **Right now it does almost nothing.** The program scans your audio folder, mixes and streams soundscapes you define over HTTP, and saves them, but there is no web page or Home Assistant integration yet: you drive it with `curl`. The mixing was first proven in a throwaway prototype (a few files looped and mixed with live level changes, played on a real speaker through Home Assistant and Music Assistant). There is no release and no published image.
 
 ## What it is going to be
 
@@ -73,13 +73,15 @@ curl -X PUT http://localhost:8007/api/soundscapes/night -d '{"layers": [
 ]}'
 ```
 
+A soundscape has a fixed ID (part of its stream URL) and a name you can change. `PUT` can also carry `"name"`; a field left out keeps its current value, so `{"name": "Sleep"}` renames without touching the mix. Other calls: `POST /api/soundscapes` with `{"name": "Night rain"}` (and optionally `"layers"`) creates one and picks the ID (`night-rain`); `POST /api/soundscapes/night/duplicate` (optionally `{"name": "..."}`) copies one; `DELETE /api/soundscapes/night` removes it and disconnects anyone listening.
+
 The reply lists each layer's state: `ready`, `loading` (being decoded; silent until it is ready), `off`, `missing` (not in the library), `unusable` or `error`. One bad layer never stops the others. Then point any player at `http://<host>:8007/stream/night` (MP3, 128 kbit/s). `GET /api/soundscapes` and `GET /api/soundscapes/night` show the state, including how many listeners there are.
 
 - **Shared work:** each file is decoded once, however many soundscapes use it, and each soundscape is mixed and encoded once however many players listen. The encoder runs only while somebody is listening and stops a few seconds after the last listener leaves.
 - **Live changes:** level changes and switching layers on or off ramp over 50 ms, so they never click. In a test with real files and the real encoder, a change reached the stream's output about 200 ms after the request. A player then adds its own buffer, which this cannot control. The one exception is a layer that is not in memory yet: switching it on is silent until it has been decoded (a fraction of a second for short files, about a second for a long recording on a busy machine), and its state reads `loading` meanwhile. A layer you switch off is dropped from memory a couple of minutes later.
 - **Loops:** every layer loops forever and independently. Silence at the start and end of a file is trimmed, and the end is crossfaded into the start. If the start and end of the audio are clearly alike (a hum, a fan, a drone), the join is moved to where they line up and the fade is linear, so they do not cancel or swell; for noise-like sounds such as rain it is an equal-power fade. Try `LOOP_CROSSFADE` if a join is audible on your recordings.
 - **Limits:** a layer longer than 20 minutes is refused. Loud mixes are eased towards full scale instead of being clipped.
-- **Not saved yet:** soundscapes live in memory and are lost when the container restarts. Saving them comes next.
+- **Saved:** soundscapes are kept in `soundscapes.json` in the config directory and come back after a restart. Changes are written about a second after they happen (a slider being dragged becomes one write), by writing a temporary file and renaming it, so a crash leaves the old or the new file, never half of one. A file the program cannot understand (damaged, or written by a newer version) is never overwritten: it refuses to start and names the file. A config directory that cannot be written to also stops it at startup.
 
 The container has a health check (`voidgrid-soundscapes healthcheck`), and invalid settings make it exit with code 2 and say which one.
 

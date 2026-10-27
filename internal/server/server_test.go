@@ -14,6 +14,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
 // --- fakes -----------------------------------------------------------------------------------------
@@ -81,7 +82,12 @@ func newTestServer(t *testing.T, layers ...library.Layer) (*httptest.Server, con
 		Grace:      50 * time.Millisecond,
 		Unpaced:    true,
 	}, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
-	ts := httptest.NewServer(New(lib, eng))
+	st, err := store.Open(t.TempDir(), 20*time.Millisecond, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	ts := httptest.NewServer(New(lib, eng, st))
 	t.Cleanup(ts.Close)
 	return ts, cancel
 }
@@ -272,5 +278,143 @@ func TestStreamEndsWhenTheEngineStops(t *testing.T) {
 	case <-done:
 	case <-time.After(3 * time.Second):
 		t.Fatal("the stream did not end when the engine stopped")
+	}
+}
+
+// --- creating, renaming, duplicating, deleting -----------------------------------------------------------
+
+func decodeView(t *testing.T, b []byte) view {
+	t.Helper()
+	var v view
+	if err := json.Unmarshal(b, &v); err != nil {
+		t.Fatalf("%v in %s", err, b)
+	}
+	return v
+}
+
+func TestCreateGivesAUniqueIDAndNameIsRequired(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"))
+	resp, body := do(t, "POST", ts.URL+"/api/soundscapes", `{"name":"  Night Rain! ","layers":[{"id":"rain.mp3","level":0.5,"enabled":true}]}`)
+	v := decodeView(t, body)
+	if resp.StatusCode != http.StatusCreated || v.ID != "night-rain" || v.Name != "Night Rain!" || len(v.Layers) != 1 {
+		t.Fatalf("create = %d %s", resp.StatusCode, body)
+	}
+	if resp.Header.Get("Location") != "/api/soundscapes/night-rain" {
+		t.Fatalf("Location = %q", resp.Header.Get("Location"))
+	}
+	// The same name again must not replace the first.
+	_, body = do(t, "POST", ts.URL+"/api/soundscapes", `{"name":"Night Rain!"}`)
+	if v2 := decodeView(t, body); v2.ID != "night-rain-2" || len(v2.Layers) != 0 {
+		t.Fatalf("second create = %s", body)
+	}
+	for name, b := range map[string]string{"no name": `{}`, "blank name": `{"name":"   "}`, "control character": `{"name":"a\u0007b"}`,
+		"too long": `{"name":"` + strings.Repeat("x", 81) + `"}`, "unknown field": `{"name":"a","colour":"red"}`, "empty body": ``} {
+		if resp, body := do(t, "POST", ts.URL+"/api/soundscapes", b); resp.StatusCode != 400 {
+			t.Errorf("%s: got %d %s, want 400", name, resp.StatusCode, body)
+		}
+	}
+	if _, body := do(t, "GET", ts.URL+"/api/soundscapes", ""); strings.Count(string(body), `"streaming"`) != 2 {
+		t.Errorf("rejected creates left soundscapes behind: %s", body)
+	}
+}
+
+func TestPutRenamesWithoutTouchingTheMix(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"))
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[{"id":"rain.mp3","level":0.4,"enabled":true}]}`)
+	_, body := do(t, "GET", ts.URL+"/api/soundscapes/night", "")
+	if v := decodeView(t, body); v.Name != "night" {
+		t.Fatalf("a soundscape created by PUT is named after its ID, got %q", v.Name)
+	}
+	resp, body := do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"name":"Sleep"}`)
+	v := decodeView(t, body)
+	if resp.StatusCode != 200 || v.ID != "night" || v.Name != "Sleep" || len(v.Layers) != 1 || v.Layers[0].Level != 0.4 {
+		t.Fatalf("rename = %d %s", resp.StatusCode, body)
+	}
+	// Sending layers without a name keeps the name.
+	_, body = do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[]}`)
+	if v := decodeView(t, body); v.Name != "Sleep" || len(v.Layers) != 0 {
+		t.Fatalf("after clearing the layers: %s", body)
+	}
+	if resp, _ := do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"name":""}`); resp.StatusCode != 400 {
+		t.Errorf("a blank name was accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestDuplicateCopiesTheMixUnderANewID(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"))
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"name":"Night","layers":[{"id":"rain.mp3","level":0.4,"enabled":true}]}`)
+	resp, body := do(t, "POST", ts.URL+"/api/soundscapes/night/duplicate", "")
+	v := decodeView(t, body)
+	if resp.StatusCode != 201 || v.ID != "night-copy" || v.Name != "Night copy" || len(v.Layers) != 1 || v.Layers[0].Level != 0.4 {
+		t.Fatalf("duplicate = %d %s", resp.StatusCode, body)
+	}
+	// Changing the copy leaves the original alone.
+	do(t, "PUT", ts.URL+"/api/soundscapes/night-copy", `{"layers":[{"id":"rain.mp3","level":0.9,"enabled":false}]}`)
+	_, body = do(t, "GET", ts.URL+"/api/soundscapes/night", "")
+	if v := decodeView(t, body); v.Layers[0].Level != 0.4 || !v.Layers[0].Enabled {
+		t.Fatalf("the original changed: %s", body)
+	}
+	_, body = do(t, "POST", ts.URL+"/api/soundscapes/night/duplicate", `{"name":"Weekend"}`)
+	if v := decodeView(t, body); v.Name != "Weekend" || v.ID != "weekend" {
+		t.Fatalf("named duplicate = %s", body)
+	}
+	if resp, _ := do(t, "POST", ts.URL+"/api/soundscapes/nope/duplicate", ""); resp.StatusCode != 404 {
+		t.Errorf("duplicate of an unknown soundscape = %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, "POST", ts.URL+"/api/soundscapes/night/duplicate", `{"layers":[]}`); resp.StatusCode != 400 {
+		t.Errorf("duplicate with layers = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDeleteDisconnectsListenersAndForgetsTheSoundscape(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"))
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[{"id":"rain.mp3","level":0.5,"enabled":true}]}`)
+	resp, err := http.Get(ts.URL + "/stream/night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if _, err := io.ReadFull(resp.Body, make([]byte, 417*2)); err != nil {
+		t.Fatal(err)
+	}
+
+	if r, b := do(t, "DELETE", ts.URL+"/api/soundscapes/night", ""); r.StatusCode != http.StatusNoContent || len(b) != 0 {
+		t.Fatalf("DELETE = %d %s", r.StatusCode, b)
+	}
+	done := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, resp.Body); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the stream kept going after its soundscape was deleted")
+	}
+	for _, path := range []string{"/api/soundscapes/night", "/stream/night"} {
+		if r, _ := do(t, "GET", ts.URL+path, ""); r.StatusCode != 404 {
+			t.Errorf("GET %s after delete = %d", path, r.StatusCode)
+		}
+	}
+	if r, _ := do(t, "DELETE", ts.URL+"/api/soundscapes/night", ""); r.StatusCode != 404 {
+		t.Errorf("second DELETE = %d, want 404", r.StatusCode)
+	}
+	// The ID can be used again.
+	if r, _ := do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[]}`); r.StatusCode != 200 {
+		t.Errorf("re-creating the ID = %d", r.StatusCode)
+	}
+}
+
+func TestListIsOrderedByName(t *testing.T) {
+	ts, _ := newTestServer(t)
+	for id, name := range map[string]string{"a": "Zebra", "b": "apple", "c": "Mango"} {
+		do(t, "PUT", ts.URL+"/api/soundscapes/"+id, `{"name":"`+name+`"}`)
+	}
+	_, body := do(t, "GET", ts.URL+"/api/soundscapes", "")
+	var got struct{ Soundscapes []view }
+	_ = json.Unmarshal(body, &got)
+	var names []string
+	for _, v := range got.Soundscapes {
+		names = append(names, v.Name)
+	}
+	if strings.Join(names, ",") != "apple,Mango,Zebra" {
+		t.Fatalf("order = %v", names)
 	}
 }

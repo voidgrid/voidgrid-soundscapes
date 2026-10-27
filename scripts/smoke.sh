@@ -70,6 +70,21 @@ for _ in $(seq 1 20); do
     awk -v v="$off" 'BEGIN { exit !(v != "" && v < -60) }' || { echo "smoke: stream is not silent with the layer off (mean volume '$off' dB)"; exit 1; }
     echo "smoke: streamed ${on} dB with the layer on, ${off} dB with it off"
 
+    # Persistence: rename it, add a second soundscape and delete a third, restart the container (a graceful
+    # stop writes what is still waiting for its delay), and check the first two come back and the third does not.
+    curl -sf -X PUT "$url/api/soundscapes/smoke" -d '{"name":"Smoke test"}' >/dev/null || { echo "smoke: rename failed"; exit 1; }
+    curl -sf -X POST "$url/api/soundscapes/smoke/duplicate" >/dev/null || { echo "smoke: duplicate failed"; exit 1; }
+    curl -sf -X PUT "$url/api/soundscapes/doomed" -d '{}' >/dev/null && curl -sf -X DELETE "$url/api/soundscapes/doomed" >/dev/null \
+      || { echo "smoke: create/delete failed"; exit 1; }
+    docker restart -t 10 "$name" >/dev/null
+    for _ in $(seq 1 20); do docker exec "$name" voidgrid-soundscapes healthcheck 2>/dev/null && break; sleep 0.5; done
+    url=http://127.0.0.1:$(docker port "$name" 8007/tcp | head -1 | sed 's/.*://')
+    after=$(curl -sf "$url/api/soundscapes") || { echo "smoke: list after restart failed"; exit 1; }
+    grep -q '"name":"Smoke test","id":"smoke"' <<<"$after" || { echo "smoke: renamed soundscape lost in restart: $after"; exit 1; }
+    grep -q '"id":"smoke-test-copy"\|"id":"smoke-copy"' <<<"$after" || { echo "smoke: duplicate lost in restart: $after"; exit 1; }
+    grep -q '"id":"doomed"' <<<"$after" && { echo "smoke: deleted soundscape came back: $after"; exit 1; }
+    echo "smoke: soundscapes survived a restart"
+
     echo "smoke: ok"
     exit 0
   fi

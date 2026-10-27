@@ -198,6 +198,30 @@ func (m *Mix) releaseLocked(id string) {
 	}
 }
 
+// close ends the soundscape for good: no more listeners, no encoder, no held layers.
+func (m *Mix) close() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for id := range m.held {
+		m.releaseLocked(id)
+	}
+	for _, id := range m.mixer.IDs() {
+		m.mixer.Remove(id)
+	}
+	m.layers, m.problems = nil, map[string]layerState{}
+	if m.grace != nil {
+		m.grace.Stop()
+		m.grace = nil
+	}
+	for l := range m.listeners {
+		l.fail(ErrRemoved)
+	}
+	m.listeners = map[*Listener]struct{}{}
+	if m.cancel != nil {
+		m.cancel() // run's finish then marks the stream stopped
+	}
+}
+
 // Status returns the current layer states.
 func (m *Mix) Status() Status {
 	m.mu.Lock()

@@ -13,6 +13,7 @@ import (
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/server"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
 // version is set at build time with -ldflags "-X main.version=...".
@@ -37,6 +38,13 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Opened before anything starts, so a config directory that cannot be used stops the program here.
+	soundscapes, err := store.Open(cfg.ConfigDir, 0, log)
+	if err != nil {
+		log.Error("cannot open the soundscape store", "err", err)
+		os.Exit(1)
+	}
+
 	lib := library.New(cfg.AudioDir, nil, log)
 	go lib.Run(ctx, cfg.ScanInterval, func(d library.Diff) {
 		layers := lib.Layers()
@@ -53,8 +61,21 @@ func main() {
 		Loop: engine.LoopOptions{Crossfade: cfg.LoopCrossfade, SilenceThreshold: engine.DefaultLoopOptions.SilenceThreshold},
 	}, log)
 
-	if err := server.Run(ctx, cfg.Listen, server.New(lib, eng), log); err != nil {
-		log.Error("server stopped", "err", err)
+	saved := soundscapes.List()
+	for _, sc := range saved {
+		if _, err := eng.Apply(sc.ID, engine.Spec{Layers: sc.Layers}); err != nil {
+			log.Error("cannot start a saved soundscape", "soundscape", sc.ID, "err", err)
+		}
+	}
+	log.Info("soundscapes loaded", "count", len(saved))
+
+	runErr := server.Run(ctx, cfg.Listen, server.New(lib, eng, soundscapes), log)
+	if err := soundscapes.Close(); err != nil { // writes any change still waiting for its delay
+		log.Error("cannot save soundscapes", "err", err)
+		os.Exit(1)
+	}
+	if runErr != nil {
+		log.Error("server stopped", "err", runErr)
 		os.Exit(1)
 	}
 	log.Info("stopped")

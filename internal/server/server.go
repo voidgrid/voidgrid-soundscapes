@@ -5,12 +5,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log/slog"
 	"net/http"
+	"strings"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
 // Layers lists the audio files that can be mixed.
@@ -24,10 +30,21 @@ type Mixes interface {
 	Status(id string) (engine.Status, bool)
 	List() []engine.Status
 	Subscribe(id string) (*engine.Listener, error)
+	Remove(id string) bool
+}
+
+// Store keeps the soundscape definitions.
+type Store interface {
+	List() []store.Soundscape
+	Get(id string) (store.Soundscape, bool)
+	Put(sc store.Soundscape)
+	Delete(id string) bool
+	NewID(name string) string
 }
 
 const (
 	maxSpecBytes = 256 << 10
+	maxNameLen   = 80 // characters
 	// writeTimeout bounds one write to a listener, so a client that stops reading is dropped instead of
 	// holding its goroutine forever. The server itself has no WriteTimeout because streams never end.
 	writeTimeout = 10 * time.Second
@@ -36,17 +53,25 @@ const (
 type server struct {
 	lib   Layers
 	mixes Mixes
+	store Store
+
+	// mu makes each change to a soundscape (store and engine together) one step, so two requests for the
+	// same soundscape cannot leave the engine playing one and the file holding the other.
+	mu sync.Mutex
 }
 
 // New returns the HTTP handler.
-func New(lib Layers, mixes Mixes) http.Handler {
-	s := &server{lib: lib, mixes: mixes}
+func New(lib Layers, mixes Mixes, st Store) http.Handler {
+	s := &server{lib: lib, mixes: mixes, store: st}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /api/layers", s.layers)
 	mux.HandleFunc("GET /api/soundscapes", s.list)
 	mux.HandleFunc("GET /api/soundscapes/{id}", s.get)
+	mux.HandleFunc("POST /api/soundscapes", s.create)
 	mux.HandleFunc("PUT /api/soundscapes/{id}", s.put)
+	mux.HandleFunc("POST /api/soundscapes/{id}/duplicate", s.duplicate)
+	mux.HandleFunc("DELETE /api/soundscapes/{id}", s.remove)
 	mux.HandleFunc("GET /stream/{id}", s.stream)
 	return mux
 }
@@ -77,40 +102,209 @@ func (s *server) layers(w http.ResponseWriter, r *http.Request) {
 	}{layers})
 }
 
+// view is a soundscape as the API shows it: its definition and what is playing.
+type view struct {
+	Name string `json:"name"`
+	engine.Status
+}
+
+func (s *server) view(sc store.Soundscape) view {
+	st, ok := s.mixes.Status(sc.ID)
+	if !ok { // cannot happen while every stored soundscape is applied; show the definition rather than nothing
+		st = engine.Status{ID: sc.ID, Layers: []engine.LayerStatus{}}
+	}
+	return view{Name: sc.Name, Status: st}
+}
+
 func (s *server) list(w http.ResponseWriter, r *http.Request) {
-	list := s.mixes.List()
-	if list == nil {
-		list = []engine.Status{}
+	list := s.store.List()
+	out := make([]view, 0, len(list))
+	for _, sc := range list {
+		out = append(out, s.view(sc))
 	}
 	writeJSON(w, http.StatusOK, struct {
-		Soundscapes []engine.Status `json:"soundscapes"`
-	}{list})
+		Soundscapes []view `json:"soundscapes"`
+	}{out})
 }
 
 func (s *server) get(w http.ResponseWriter, r *http.Request) {
-	st, ok := s.mixes.Status(r.PathValue("id"))
+	sc, ok := s.store.Get(r.PathValue("id"))
 	if !ok {
 		writeError(w, http.StatusNotFound, "unknown soundscape")
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	writeJSON(w, http.StatusOK, s.view(sc))
 }
 
-// put defines or replaces a soundscape. The body is the whole mix, so sending it again is harmless.
-func (s *server) put(w http.ResponseWriter, r *http.Request) {
-	var spec engine.Spec
+// body is what create and put accept. A field left out keeps its current value.
+type body struct {
+	Name   *string             `json:"name"`
+	Layers *[]engine.LayerSpec `json:"layers"`
+}
+
+func decode(w http.ResponseWriter, r *http.Request, into any, allowEmpty bool) bool {
 	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxSpecBytes))
 	dec.DisallowUnknownFields() // a typo such as "enable" must not silently switch nothing on
-	if err := dec.Decode(&spec); err != nil {
+	err := dec.Decode(into)
+	if err == io.EOF && allowEmpty {
+		return true
+	}
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "bad request body: "+err.Error())
+		return false
+	}
+	return true
+}
+
+// cleanName trims name and checks it can be shown as a title.
+func cleanName(name string) (string, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "", errors.New("name is required")
+	}
+	if utf8.RuneCountInString(name) > maxNameLen {
+		return "", errors.New("name is longer than 80 characters")
+	}
+	for _, r := range name {
+		if unicode.IsControl(r) {
+			return "", errors.New("name may not contain control characters")
+		}
+	}
+	return name, nil
+}
+
+// save plays sc and records it. The layers saved are the ones the engine accepted (levels clamped,
+// duplicates dropped), so the file never holds anything the engine would not play. Callers hold s.mu.
+func (s *server) save(sc store.Soundscape) (view, error) {
+	st, err := s.mixes.Apply(sc.ID, engine.Spec{Layers: sc.Layers})
+	if err != nil {
+		return view{}, err
+	}
+	sc.Layers = sc.Layers[:0:0]
+	for _, l := range st.Layers {
+		sc.Layers = append(sc.Layers, engine.LayerSpec{ID: l.ID, Level: l.Level, Enabled: l.Enabled})
+	}
+	s.store.Put(sc)
+	return view{Name: sc.Name, Status: st}, nil
+}
+
+// create makes a new soundscape; the server picks its ID from the name.
+func (s *server) create(w http.ResponseWriter, r *http.Request) {
+	var b body
+	if !decode(w, r, &b, false) {
 		return
 	}
-	st, err := s.mixes.Apply(r.PathValue("id"), spec)
+	if b.Name == nil {
+		writeError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	name, err := cleanName(*b.Name)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	writeJSON(w, http.StatusOK, st)
+	sc := store.Soundscape{Name: name}
+	if b.Layers != nil {
+		sc.Layers = *b.Layers
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc.ID = s.store.NewID(name)
+	v, err := s.save(sc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Location", "/api/soundscapes/"+sc.ID)
+	writeJSON(w, http.StatusCreated, v)
+}
+
+// put defines or replaces a soundscape. Sending the whole mix again is harmless. "name" renames it (a new
+// soundscape is named after its ID if none is given); leaving out "layers" keeps the current mix.
+func (s *server) put(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if !engine.ValidID(id) {
+		writeError(w, http.StatusBadRequest, "soundscape IDs are 1-64 letters, digits, '.', '_' or '-', starting with a letter or digit")
+		return
+	}
+	var b body
+	if !decode(w, r, &b, false) {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc, exists := s.store.Get(id)
+	if !exists {
+		sc = store.Soundscape{ID: id, Name: id}
+	}
+	if b.Name != nil {
+		name, err := cleanName(*b.Name)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		sc.Name = name
+	}
+	if b.Layers != nil {
+		sc.Layers = *b.Layers
+	}
+	v, err := s.save(sc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// duplicate copies a soundscape under a new ID. The optional body {"name": "..."} names the copy.
+func (s *server) duplicate(w http.ResponseWriter, r *http.Request) {
+	var b body
+	if !decode(w, r, &b, true) {
+		return
+	}
+	if b.Layers != nil {
+		writeError(w, http.StatusBadRequest, "bad request body: only \"name\" can be given when duplicating")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	src, ok := s.store.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown soundscape")
+		return
+	}
+	name := src.Name + " copy"
+	if b.Name != nil {
+		name = *b.Name
+	}
+	if utf8.RuneCountInString(name) > maxNameLen { // the default can overshoot by the suffix
+		name = string([]rune(name)[:maxNameLen])
+	}
+	name, err := cleanName(name)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	v, err := s.save(store.Soundscape{ID: s.store.NewID(name), Name: name, Layers: src.Layers})
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	w.Header().Set("Location", "/api/soundscapes/"+v.ID)
+	writeJSON(w, http.StatusCreated, v)
+}
+
+// remove deletes a soundscape. Anyone listening to it is disconnected.
+func (s *server) remove(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.store.Delete(id) {
+		writeError(w, http.StatusNotFound, "unknown soundscape")
+		return
+	}
+	s.mixes.Remove(id)
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // stream sends a soundscape as MP3 until the client goes away or the stream stops.
