@@ -6,7 +6,7 @@ I want to have rain, waves, or anything else I want to fall asleep to, and be ab
 
 I wrote this using Claude. The design is mine (what a soundscape is, how folders work, how Home Assistant fits in, what V1 includes and leaves out); a lot of the code is Claude's. I'm also learning Go as I go, and I'll be reading all of the code, over time, after it has been written here. Until I have, don't take my word for it that the code is good: read it before you trust it, especially if it is going anywhere near a speaker in a room where someone is asleep. It is a one person plus AI project and I would rather be upfront about that than have you find out later.
 
-It is also very early. **Right now it does almost nothing.** The program scans your audio folder, mixes and streams soundscapes you define over HTTP, and saves them, but there is no web page or Home Assistant integration yet: you drive it with `curl`. The mixing was first proven in a throwaway prototype (a few files looped and mixed with live level changes, played on a real speaker through Home Assistant and Music Assistant). There is no release and no published image.
+It is also very early. **Right now it does almost nothing.** The program scans your audio folder, mixes and streams soundscapes over HTTP, saves them, and has a web page to mix them on. There is no Home Assistant integration yet, so nothing tells a speaker to play: you give a player the stream URL yourself. The mixing was first proven in a throwaway prototype (a few files looped and mixed with live level changes, played on a real speaker through Home Assistant and Music Assistant). There is no release and no published image.
 
 ## What it is going to be
 
@@ -62,6 +62,12 @@ Put audio files anywhere under the audio directory. Each file is a **layer**, id
 - New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
 - `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
 
+### The web page
+
+Open `http://<host>:8007/`. The landing page is a card for each saved soundscape; a card opens its mixer. A mixer shows only the sounds in that soundscape, each with an on/off switch, a level slider and a ✕ to take it out of the soundscape (the file is not touched). The **Add** menu at the bottom lists the sounds that are not in it yet. Changes are applied as you make them and saved automatically; there is no Save button. **Listen** plays the stream in that browser tab (a browser buffers a second or more, so it lags your slider more than the server does). Rename, Duplicate and Delete are on the mixer, and the stream URL is there to copy. Several tabs stay in sync. It is green on black, like voidgrid-backup, and works on a phone.
+
+The page has no login (the plan is a trusted LAN or your own reverse proxy), and its scripts and styles are all served by the program itself.
+
 ### Soundscapes and streaming
 
 A soundscape is a named mix of layers, each with a level from 0 to 1 and an on/off switch. Define one by sending the whole mix; sending it again is harmless, and you can send it while someone is listening to hear the change live:
@@ -72,6 +78,8 @@ curl -X PUT http://localhost:8007/api/soundscapes/night -d '{"layers": [
   {"id": "waves/gentle.flac", "level": 0.3, "enabled": true}
 ]}'
 ```
+
+To change one layer without sending the whole mix (this is what the web page does, so two browsers adjusting different layers do not overwrite each other): `PATCH /api/soundscapes/night/layers` with `{"id": "rain/heavy.mp3", "level": 0.4}`, `{"id": "...", "enabled": true}` or `{"id": "...", "remove": true}`. A layer that is not yet in the soundscape is added (from the library only), at level 0.5 and off unless you say otherwise. `GET /api/events` is a server-sent-events feed of the whole state (layers and soundscapes), sent on connect and whenever it changes.
 
 A soundscape has a fixed ID (part of its stream URL) and a name you can change. `PUT` can also carry `"name"`; a field left out keeps its current value, so `{"name": "Sleep"}` renames without touching the mix. Other calls: `POST /api/soundscapes` with `{"name": "Night rain"}` (and optionally `"layers"`) creates one and picks the ID (`night-rain`); `POST /api/soundscapes/night/duplicate` (optionally `{"name": "..."}`) copies one; `DELETE /api/soundscapes/night` removes it and disconnects anyone listening.
 

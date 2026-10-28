@@ -1,0 +1,67 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>Soundscapes</title>
+<link rel="stylesheet" href="style.css">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cpath d='M2 16h4l3-9 5 18 5-14 3 5h8' fill='none' stroke='%2300ff66' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
+</head>
+<body>
+
+<section id="listView" hidden>
+  <header>
+    <div class="bar">
+      <h1>Soundscapes</h1>
+      <span class="live" role="status" aria-live="polite">Connecting…</span>
+    </div>
+  </header>
+  <main>
+    <div id="cards" class="cards"></div>
+    <button id="new" type="button" class="primary wide">New soundscape</button>
+  </main>
+</section>
+
+<section id="mixView" hidden>
+  <header>
+    <div class="bar">
+      <a href="#/" class="back">← Soundscapes</a>
+      <span class="live" role="status" aria-live="polite">Connecting…</span>
+    </div>
+    <h1 id="title"></h1>
+    <div class="bar actions">
+      <button id="listen" type="button" title="Hear this soundscape in this browser">Listen</button>
+      <button id="rename" type="button">Rename</button>
+      <button id="duplicate" type="button">Duplicate</button>
+      <button id="delete" type="button" class="danger">Delete</button>
+    </div>
+    <div id="info" class="info"></div>
+  </header>
+  <main>
+    <div id="layers"></div>
+    <div class="add">
+      <label class="sr" for="add">Add a sound</label>
+      <select id="add"></select>
+    </div>
+  </main>
+</section>
+
+<audio id="player" preload="none"></audio>
+
+<dialog id="dialog">
+  <form method="dialog" id="dialogForm">
+    <h2 id="dialogTitle"></h2>
+    <p id="dialogText"></p>
+    <input id="dialogInput" type="text" maxlength="80" autocomplete="off" aria-labelledby="dialogTitle">
+    <div class="buttons">
+      <button type="button" id="dialogCancel">Cancel</button>
+      <button type="submit" id="dialogOk" class="primary">OK</button>
+    </div>
+  </form>
+</dialog>
+
+<div id="toast" class="toast" role="alert" hidden></div>
+<script src="app.js"></script>
+</body>
+</html>

@@ -52,7 +52,9 @@ type Store struct {
 	mu     sync.Mutex
 	items  map[string]Soundscape
 	timer  *time.Timer // set while a write is waiting
+	dirty  bool        // changes not yet written
 	closed bool
+	writes sync.WaitGroup // delayed writes that have started; Close waits for them
 
 	writeMu sync.Mutex // one write at a time, so an older snapshot can never land after a newer one
 }
@@ -198,23 +200,32 @@ func slug(name string) string {
 	return out
 }
 
-// dirtyLocked schedules a write unless one is already waiting. The timer is not pushed back by further
-// changes, so a continuous stream of them still reaches the disk once per delay.
+// dirtyLocked records a change and schedules a write unless one is already waiting. The timer is not pushed
+// back by further changes, so a continuous stream of them still reaches the disk once per delay.
 func (s *Store) dirtyLocked() {
+	s.dirty = true
 	if s.timer != nil || s.closed {
 		return
 	}
-	s.timer = time.AfterFunc(s.delay, func() {
-		s.mu.Lock()
-		s.timer = nil
+	s.timer = time.AfterFunc(s.delay, s.delayedWrite)
+}
+
+func (s *Store) delayedWrite() {
+	s.mu.Lock()
+	if s.closed { // Close writes whatever is still unsaved
 		s.mu.Unlock()
-		if err := s.Flush(); err != nil {
-			s.log.Error("cannot save soundscapes; will retry", "err", err)
-			s.mu.Lock()
-			s.dirtyLocked()
-			s.mu.Unlock()
-		}
-	})
+		return
+	}
+	s.timer = nil
+	s.writes.Add(1) // under mu, while not closed, so it cannot race with Close's Wait
+	s.mu.Unlock()
+	defer s.writes.Done()
+	if err := s.Flush(); err != nil {
+		s.log.Error("cannot save soundscapes; will retry", "err", err)
+		s.mu.Lock()
+		s.dirtyLocked()
+		s.mu.Unlock()
+	}
 }
 
 // Flush writes the current state now. The file is replaced atomically: a crash leaves the old or the new
@@ -224,24 +235,35 @@ func (s *Store) Flush() error {
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
 	data, err := json.MarshalIndent(file{Version: Version, Soundscapes: s.listLocked()}, "", "  ")
+	s.dirty = false
 	s.mu.Unlock()
 	if err != nil {
 		return err
 	}
-	return writeAtomic(s.path, append(data, '\n'))
+	if err := writeAtomic(s.path, append(data, '\n')); err != nil {
+		s.mu.Lock()
+		s.dirty = true
+		s.mu.Unlock()
+		return err
+	}
+	return nil
 }
 
-// Close stops the delayed write and writes anything pending.
+// Close writes any change that has not been saved yet and waits for a write already under way, so nothing
+// is written after it returns.
 func (s *Store) Close() error {
 	s.mu.Lock()
 	s.closed = true
-	pending := s.timer != nil
 	if s.timer != nil {
 		s.timer.Stop()
 		s.timer = nil
 	}
 	s.mu.Unlock()
-	if !pending {
+	s.writes.Wait()
+	s.mu.Lock()
+	dirty := s.dirty
+	s.mu.Unlock()
+	if !dirty {
 		return nil
 	}
 	return s.Flush()

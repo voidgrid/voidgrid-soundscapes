@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -416,5 +418,182 @@ func TestListIsOrderedByName(t *testing.T) {
 	}
 	if strings.Join(names, ",") != "apple,Mango,Zebra" {
 		t.Fatalf("order = %v", names)
+	}
+}
+
+// --- single-layer changes, events, and the web page ------------------------------------------------------
+
+func TestPatchChangesOneLayerAndLeavesTheRest(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"), layerOf("fan.wav"), library.Layer{ID: "bad.mp3", Name: "bad", Error: "no audio"})
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[{"id":"rain.mp3","level":0.4,"enabled":true}]}`)
+	patch := func(body string) (int, view) {
+		resp, b := do(t, "PATCH", ts.URL+"/api/soundscapes/night/layers", body)
+		var v view
+		_ = json.Unmarshal(b, &v)
+		return resp.StatusCode, v
+	}
+
+	// Adding a layer from the library: off at the default level unless told otherwise.
+	if code, v := patch(`{"id":"fan.wav"}`); code != 200 || len(v.Layers) != 2 || v.Layers[1].ID != "fan.wav" || v.Layers[1].Enabled || v.Layers[1].Level != 0.5 {
+		t.Fatalf("add = %d %+v", code, v.Layers)
+	}
+	// Level only, then enabled only: each keeps the other.
+	if code, v := patch(`{"id":"fan.wav","level":0.8}`); code != 200 || v.Layers[1].Level != 0.8 || v.Layers[1].Enabled {
+		t.Fatalf("level = %d %+v", code, v.Layers)
+	}
+	if code, v := patch(`{"id":"fan.wav","enabled":true}`); code != 200 || v.Layers[1].Level != 0.8 || !v.Layers[1].Enabled {
+		t.Fatalf("enable = %d %+v", code, v.Layers)
+	}
+	// The first layer was never touched.
+	_, b := do(t, "GET", ts.URL+"/api/soundscapes/night", "")
+	if v := decodeView(t, b); v.Layers[0].ID != "rain.mp3" || v.Layers[0].Level != 0.4 || !v.Layers[0].Enabled {
+		t.Fatalf("the other layer changed: %s", b)
+	}
+	// Add with explicit settings, remove, and removing something that is not there.
+	if code, v := patch(`{"id":"bad.mp3","level":1,"enabled":true}`); code != 200 || v.Layers[2].State != engine.StateUnusable {
+		t.Fatalf("adding an unusable layer = %d %+v", code, v.Layers)
+	}
+	if code, v := patch(`{"id":"bad.mp3","remove":true}`); code != 200 || len(v.Layers) != 2 {
+		t.Fatalf("remove = %d %+v", code, v.Layers)
+	}
+	if code, _ := patch(`{"id":"bad.mp3","remove":true}`); code != 200 {
+		t.Fatalf("removing an absent layer = %d, want 200", code)
+	}
+	for name, body := range map[string]string{"no id": `{"level":1}`, "not in the library": `{"id":"nope.mp3"}`, "unknown field": `{"id":"fan.wav","volume":1}`, "empty": ``} {
+		if code, _ := patch(body); code != 400 {
+			t.Errorf("%s: got %d, want 400", name, code)
+		}
+	}
+	if resp, _ := do(t, "PATCH", ts.URL+"/api/soundscapes/nope/layers", `{"id":"fan.wav"}`); resp.StatusCode != 404 {
+		t.Errorf("patch of an unknown soundscape = %d", resp.StatusCode)
+	}
+}
+
+// readEvent returns the data of the next "state" event.
+func readEvent(t *testing.T, r *bufio.Reader) string {
+	t.Helper()
+	type res struct {
+		data string
+		err  error
+	}
+	ch := make(chan res, 1)
+	go func() {
+		var event string
+		for {
+			line, err := r.ReadString('\n')
+			if err != nil {
+				ch <- res{err: err}
+				return
+			}
+			line = strings.TrimRight(line, "\r\n")
+			switch {
+			case strings.HasPrefix(line, "event: "):
+				event = strings.TrimPrefix(line, "event: ")
+			case strings.HasPrefix(line, "data: ") && event == "state":
+				ch <- res{data: strings.TrimPrefix(line, "data: ")}
+				return
+			}
+		}
+	}()
+	select {
+	case v := <-ch:
+		if v.err != nil {
+			t.Fatal(v.err)
+		}
+		return v.data
+	case <-time.After(3 * time.Second):
+		t.Fatal("no event arrived")
+		return ""
+	}
+}
+
+func TestEventsSendTheStateAtOnceAndAgainOnEveryChange(t *testing.T) {
+	ts, _ := newTestServer(t, layerOf("rain.mp3"))
+	resp, err := http.Get(ts.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("Content-Type") != "text/event-stream" {
+		t.Fatalf("content type %q", resp.Header.Get("Content-Type"))
+	}
+	r := bufio.NewReader(resp.Body)
+	first := readEvent(t, r)
+	if !strings.Contains(first, `"layers":[{"id":"rain.mp3"`) || !strings.Contains(first, `"soundscapes":[]`) || strings.Contains(first, "/secret/host/path") {
+		t.Fatalf("first event: %s", first)
+	}
+
+	start := time.Now()
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"name":"Night"}`)
+	next := readEvent(t, r)
+	if !strings.Contains(next, `"name":"Night"`) {
+		t.Fatalf("event after a change: %s", next)
+	}
+	if d := time.Since(start); d > 400*time.Millisecond {
+		t.Errorf("the change took %v to reach the page; a change made through the API should be pushed at once, not at the next poll", d)
+	}
+
+	// Something that changes by itself (a listener arriving) is picked up by the poll.
+	stream, err := http.Get(ts.URL + "/stream/night")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stream.Body.Close()
+	if got := readEvent(t, r); !strings.Contains(got, `"listeners":1`) {
+		t.Fatalf("event after a listener joined: %s", got)
+	}
+}
+
+func TestEventStreamEndsWhenTheServerShutsDown(t *testing.T) {
+	ctx, stop := context.WithCancel(context.Background())
+	srv := httptest.NewUnstartedServer(nil)
+	lib := fakeLib{layerOf("rain.mp3")}
+	eng := engine.New(ctx, lib, engine.Options{}, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	st, _ := store.Open(t.TempDir(), 0, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
+	defer st.Close()
+	srv.Config.Handler = New(lib, eng, st)
+	srv.Config.BaseContext = func(net.Listener) context.Context { return ctx }
+	srv.Start()
+	defer srv.Close()
+
+	resp, err := http.Get(srv.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	readEvent(t, bufio.NewReader(resp.Body))
+	stop()
+	done := make(chan struct{})
+	go func() { _, _ = io.Copy(io.Discard, resp.Body); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("the event stream outlived the server's context")
+	}
+}
+
+func TestWebPageIsServedWithItsAssets(t *testing.T) {
+	ts, _ := newTestServer(t)
+	for path, want := range map[string]string{"/": "text/html", "/index.html": "", "/app.js": "javascript", "/style.css": "text/css"} {
+		resp, body := do(t, "GET", ts.URL+path, "")
+		if path == "/index.html" {
+			if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusMovedPermanently {
+				t.Errorf("%s = %d", path, resp.StatusCode)
+			}
+			continue
+		}
+		if resp.StatusCode != 200 || !strings.Contains(resp.Header.Get("Content-Type"), want) || len(body) < 100 {
+			t.Errorf("%s = %d %q (%d bytes)", path, resp.StatusCode, resp.Header.Get("Content-Type"), len(body))
+		}
+		if csp := resp.Header.Get("Content-Security-Policy"); !strings.Contains(csp, "default-src 'self'") || resp.Header.Get("Cache-Control") != "no-cache" {
+			t.Errorf("%s: CSP %q, Cache-Control %q", path, csp, resp.Header.Get("Cache-Control"))
+		}
+	}
+	_, page := do(t, "GET", ts.URL+"/", "")
+	if strings.Contains(string(page), "<script>") || strings.Contains(string(page), "onclick") {
+		t.Error("the page uses inline script, which its Content-Security-Policy forbids")
+	}
+	if resp, _ := do(t, "GET", ts.URL+"/nope.txt", ""); resp.StatusCode != 404 {
+		t.Errorf("unknown path = %d", resp.StatusCode)
 	}
 }

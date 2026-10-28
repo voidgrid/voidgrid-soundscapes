@@ -2,11 +2,13 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"strings"
 	"sync"
@@ -17,6 +19,7 @@ import (
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/web"
 )
 
 // Layers lists the audio files that can be mixed.
@@ -58,11 +61,29 @@ type server struct {
 	// mu makes each change to a soundscape (store and engine together) one step, so two requests for the
 	// same soundscape cannot leave the engine playing one and the file holding the other.
 	mu sync.Mutex
+
+	// changed is closed (and replaced) after every change made through the API, which wakes the event streams
+	// at once instead of at their next poll.
+	cmu     sync.Mutex
+	changed chan struct{}
+}
+
+func (s *server) notify() {
+	s.cmu.Lock()
+	close(s.changed)
+	s.changed = make(chan struct{})
+	s.cmu.Unlock()
+}
+
+func (s *server) changes() <-chan struct{} {
+	s.cmu.Lock()
+	defer s.cmu.Unlock()
+	return s.changed
 }
 
 // New returns the HTTP handler.
 func New(lib Layers, mixes Mixes, st Store) http.Handler {
-	s := &server{lib: lib, mixes: mixes, store: st}
+	s := &server{lib: lib, mixes: mixes, store: st, changed: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /api/layers", s.layers)
@@ -72,6 +93,9 @@ func New(lib Layers, mixes Mixes, st Store) http.Handler {
 	mux.HandleFunc("PUT /api/soundscapes/{id}", s.put)
 	mux.HandleFunc("POST /api/soundscapes/{id}/duplicate", s.duplicate)
 	mux.HandleFunc("DELETE /api/soundscapes/{id}", s.remove)
+	mux.HandleFunc("PATCH /api/soundscapes/{id}/layers", s.patchLayer)
+	mux.HandleFunc("GET /api/events", s.events)
+	mux.Handle("GET /", web.Handler())
 	mux.HandleFunc("GET /stream/{id}", s.stream)
 	return mux
 }
@@ -185,6 +209,7 @@ func (s *server) save(sc store.Soundscape) (view, error) {
 		sc.Layers = append(sc.Layers, engine.LayerSpec{ID: l.ID, Level: l.Level, Enabled: l.Enabled})
 	}
 	s.store.Put(sc)
+	s.notify()
 	return view{Name: sc.Name, Status: st}, nil
 }
 
@@ -304,7 +329,150 @@ func (s *server) remove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.mixes.Remove(id)
+	s.notify()
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// layerPatch changes one layer of a soundscape and leaves the others alone, so two people (or two tabs)
+// adjusting different layers never overwrite each other the way sending the whole mix would.
+type layerPatch struct {
+	ID      string   `json:"id"`
+	Level   *float64 `json:"level"`
+	Enabled *bool    `json:"enabled"`
+	Remove  bool     `json:"remove"`
+}
+
+// newLayerLevel is the level a layer gets when it is added without one.
+const newLayerLevel = 0.5
+
+func (s *server) patchLayer(w http.ResponseWriter, r *http.Request) {
+	var p layerPatch
+	if !decode(w, r, &p, false) {
+		return
+	}
+	if p.ID == "" {
+		writeError(w, http.StatusBadRequest, "id is required")
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sc, ok := s.store.Get(r.PathValue("id"))
+	if !ok {
+		writeError(w, http.StatusNotFound, "unknown soundscape")
+		return
+	}
+	at := -1
+	for i, l := range sc.Layers {
+		if l.ID == p.ID {
+			at = i
+		}
+	}
+	switch {
+	case p.Remove:
+		if at >= 0 {
+			sc.Layers = append(sc.Layers[:at], sc.Layers[at+1:]...)
+		}
+	case at >= 0:
+		if p.Level != nil {
+			sc.Layers[at].Level = *p.Level
+		}
+		if p.Enabled != nil {
+			sc.Layers[at].Enabled = *p.Enabled
+		}
+	default:
+		known := false
+		for _, l := range s.lib.Layers() {
+			known = known || l.ID == p.ID
+		}
+		if !known {
+			writeError(w, http.StatusBadRequest, "that layer is not in the library")
+			return
+		}
+		add := engine.LayerSpec{ID: p.ID, Level: newLayerLevel}
+		if p.Level != nil {
+			add.Level = *p.Level
+		}
+		if p.Enabled != nil {
+			add.Enabled = *p.Enabled
+		}
+		sc.Layers = append(sc.Layers, add)
+	}
+	v, err := s.save(sc)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, v)
+}
+
+// snapshot is everything the web page shows.
+type snapshot struct {
+	Layers      []library.Layer `json:"layers"`
+	Soundscapes []view          `json:"soundscapes"`
+}
+
+func (s *server) snapshot() ([]byte, error) {
+	snap := snapshot{Layers: s.lib.Layers(), Soundscapes: []view{}}
+	if snap.Layers == nil {
+		snap.Layers = []library.Layer{}
+	}
+	for _, sc := range s.store.List() {
+		snap.Soundscapes = append(snap.Soundscapes, s.view(sc))
+	}
+	return json.Marshal(snap)
+}
+
+const (
+	eventPoll      = 500 * time.Millisecond // how often state that changes by itself (loading, listeners, the library) is looked at
+	eventKeepalive = 15 * time.Second
+)
+
+// events streams the state to the web page as server-sent events: the whole state on connect, then again
+// whenever it differs from what this client last got.
+func (s *server) events(w http.ResponseWriter, r *http.Request) {
+	h := w.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-store")
+	h.Set("X-Accel-Buffering", "no") // a reverse proxy must not hold the events back
+	w.WriteHeader(http.StatusOK)
+	rc := http.NewResponseController(w)
+	_ = rc.Flush()
+
+	var last []byte
+	poll := time.NewTicker(eventPoll)
+	defer poll.Stop()
+	quiet := time.Now()
+	for {
+		wake := s.changes() // taken before the snapshot, so a change made during it is not missed
+		data, err := s.snapshot()
+		if err != nil {
+			return
+		}
+		var out []byte
+		switch {
+		case !bytes.Equal(data, last):
+			last = data
+			out = append(append([]byte("event: state\ndata: "), data...), '\n', '\n')
+		case time.Since(quiet) >= eventKeepalive:
+			out = []byte(": keepalive\n\n")
+		}
+		if out != nil {
+			_ = rc.SetWriteDeadline(time.Now().Add(writeTimeout))
+			if _, err := w.Write(out); err != nil {
+				return
+			}
+			if err := rc.Flush(); err != nil {
+				return
+			}
+			quiet = time.Now()
+		}
+		select {
+		case <-wake:
+		case <-poll.C:
+		case <-r.Context().Done():
+			return
+		}
+	}
 }
 
 // stream sends a soundscape as MP3 until the client goes away or the stream stops.
@@ -348,7 +516,9 @@ func (s *server) stream(w http.ResponseWriter, r *http.Request) {
 
 // Run serves h on addr until ctx is cancelled, then shuts down gracefully.
 func Run(ctx context.Context, addr string, h http.Handler, log *slog.Logger) error {
-	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second}
+	// Requests inherit ctx, so cancelling it ends the streams and event feeds that would otherwise keep Shutdown waiting.
+	srv := &http.Server{Addr: addr, Handler: h, ReadHeaderTimeout: 10 * time.Second,
+		BaseContext: func(net.Listener) context.Context { return ctx }}
 	errc := make(chan error, 1)
 	go func() { errc <- srv.ListenAndServe() }()
 	log.Info("listening", "addr", addr)
