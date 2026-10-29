@@ -52,6 +52,24 @@ func Load() (Config, error) {
 	return load(os.LookupEnv)
 }
 
+// ListenAddr returns only the listen address. The container health check uses it: Docker runs the check in
+// its own process, which does not have the secrets a wrapper injects into the server (the Home Assistant
+// token, the MQTT password), so it must not insist on a complete, valid configuration.
+func ListenAddr() (string, error) {
+	return listenAddr(os.LookupEnv)
+}
+
+func listenAddr(lookup func(string) (string, bool)) (string, error) {
+	addr := ":8007"
+	if v, ok := lookup(prefix + "LISTEN"); ok && v != "" {
+		addr = v
+	}
+	if _, err := strconv.Atoi(portOf(addr)); err != nil {
+		return "", fmt.Errorf("%sLISTEN: %q has no numeric port", prefix, addr)
+	}
+	return addr, nil
+}
+
 func load(lookup func(string) (string, bool)) (Config, error) {
 	get := func(name, def string) string {
 		if v, ok := lookup(prefix + name); ok && v != "" {

@@ -113,3 +113,25 @@ func TestStringLeavesOutSecrets(t *testing.T) {
 		t.Fatalf("%s", out)
 	}
 }
+
+// The container health check runs without the secrets the server is started with. It must still work when
+// the Home Assistant URL is set and its token is not, which Load rightly refuses.
+func TestListenAddrIgnoresTheRestOfTheConfiguration(t *testing.T) {
+	partial := env(map[string]string{
+		"VOIDGRID_SOUNDSCAPES_HA_URL": "http://192.168.1.211:8123", // token deliberately missing
+		"VOIDGRID_SOUNDSCAPES_LISTEN": "127.0.0.1:9000",
+	})
+	if _, err := load(partial); err == nil {
+		t.Fatal("Load accepted a Home Assistant URL without a token")
+	}
+	addr, err := listenAddr(partial)
+	if err != nil || addr != "127.0.0.1:9000" {
+		t.Fatalf("listenAddr = %q, %v", addr, err)
+	}
+	if addr, err := listenAddr(env(nil)); err != nil || addr != ":8007" {
+		t.Fatalf("default = %q, %v", addr, err)
+	}
+	if _, err := listenAddr(env(map[string]string{"VOIDGRID_SOUNDSCAPES_LISTEN": "nonsense"})); err == nil {
+		t.Fatal("a bad listen address was accepted")
+	}
+}

@@ -10,11 +10,11 @@ cleanup() {
   docker rm -f "$name" >/dev/null 2>&1 || true
   # Files made inside the container belong to uid 1000, which may not be the host user (it is not on a CI
   # runner), so remove them as that user before removing the directory.
-  docker run --rm --user 1000:1000 --entrypoint rm -v "$dir:/work" "$image" -rf /work/audio /work/config >/dev/null 2>&1 || true
+  docker run --rm --user 1000:1000 --entrypoint rm -v "$dir:/work" "$image" -rf /work/audio /work/config /work/config2 >/dev/null 2>&1 || true
   rm -rf "$dir" 2>/dev/null || true
 }
 trap cleanup EXIT
-mkdir "$dir/audio" "$dir/config" && chmod 777 "$dir/audio" "$dir/config"
+mkdir "$dir/audio" "$dir/config" "$dir/config2" && chmod 777 "$dir/audio" "$dir/config" "$dir/config2"
 
 docker run -d --name "$name" --user 1000:1000 --cap-drop ALL -p 127.0.0.1::8007 \
   --security-opt no-new-privileges:true --read-only \
@@ -90,6 +90,24 @@ for _ in $(seq 1 20); do
     grep -q '"id":"smoke-test-copy"\|"id":"smoke-copy"' <<<"$after" || { echo "smoke: duplicate lost in restart: $after"; exit 1; }
     grep -q '"id":"doomed"' <<<"$after" && { echo "smoke: deleted soundscape came back: $after"; exit 1; }
     echo "smoke: soundscapes survived a restart"
+
+    # The health check must work without the server's secrets: Docker runs it in its own process, which does not
+    # get what a secrets wrapper injects into the server (here: the Home Assistant token is set for the server
+    # only, so the container's own environment has a Home Assistant URL and no token).
+    wrapped=$name-wrapped
+    docker run -d --name "$wrapped" --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true --read-only \
+      -e VOIDGRID_SOUNDSCAPES_HA_URL=http://127.0.0.1:1 -e VOIDGRID_SOUNDSCAPES_PUBLIC_URL=http://127.0.0.1:8007 \
+      -v "$dir/audio:/soundscapes/audio:ro" -v "$dir/config2:/soundscapes/config" \
+      --entrypoint sh "$image" -c 'VOIDGRID_SOUNDSCAPES_HA_TOKEN=smoke-not-a-token exec voidgrid-soundscapes' >/dev/null
+    healthy=""
+    for _ in $(seq 1 20); do
+      docker exec "$wrapped" voidgrid-soundscapes healthcheck >/dev/null 2>&1 && { healthy=yes; break; }
+      sleep 0.5
+    done
+    out=$(docker exec "$wrapped" voidgrid-soundscapes healthcheck 2>&1 || true)
+    docker rm -f "$wrapped" >/dev/null 2>&1 || true
+    [ -n "$healthy" ] || { echo "smoke: the health check fails without the server's secrets: $out"; exit 1; }
+    echo "smoke: health check works without the server's secrets"
 
     echo "smoke: ok"
     exit 0

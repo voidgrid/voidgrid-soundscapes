@@ -64,6 +64,7 @@ docker run -d --name voidgrid-soundscapes --restart unless-stopped \
   ghcr.io/voidgrid/voidgrid-soundscapes:beta
 ```
 
+- **Secrets:** the Home Assistant token and the MQTT password can be given to the server alone, by a wrapper or secrets manager that starts it. The health check does not need them (it reads only `LISTEN`), so a container started that way still reports `healthy`.
 - **Updating:** `docker compose pull && docker compose up -d`. Streams drop for a moment and players reconnect; soundscapes are kept in the config folder.
 - **Logs:** `docker compose logs -f`. They list what was configured (secrets are shown only as `set`), the audio library changes, and every stream start and stop.
 - **Memory:** every sound that is switched on in a saved soundscape is decoded into memory (about 5 MB per minute of audio). A library of a few hours of audio, mostly switched on, needs a few hundred MB. Sounds switched off are released after a couple of minutes.

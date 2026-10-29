@@ -13,12 +13,13 @@ import (
 // healthcheck probes the local /healthz and returns a process exit code. It lets the container check
 // itself without shipping curl.
 func healthcheck() int {
-	cfg, err := config.Load()
+	// Only the listen address: this process does not get the server's secrets (see config.ListenAddr).
+	listen, err := config.ListenAddr()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "config:", err)
 		return 2
 	}
-	_, port, err := net.SplitHostPort(cfg.Listen)
+	_, port, err := net.SplitHostPort(listen)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "listen:", err)
 		return 2
