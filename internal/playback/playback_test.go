@@ -37,6 +37,7 @@ type fakeHA struct {
 	states   map[string]ha.PlayerState
 	playErr  error
 	stateErr error
+	quiet    bool // Play makes the player report "playing" without saying what, like a Cast speaker
 	calls    []string
 }
 
@@ -57,6 +58,10 @@ func (f *fakeHA) Play(_ context.Context, id, u string) error {
 	f.calls = append(f.calls, "play "+id+" "+u)
 	if f.playErr != nil {
 		return f.playErr
+	}
+	if f.quiet {
+		f.states[id] = ha.PlayerState{State: "playing"}
+		return nil
 	}
 	f.states[id] = ha.PlayerState{State: "playing", MediaContentID: "builtin://radio/" + u}
 	return nil
@@ -169,21 +174,106 @@ func TestPlayingMeansOurStreamOnTheChosenPlayer(t *testing.T) {
 	}
 }
 
-func TestStopOnlyStopsOurStream(t *testing.T) {
+func TestStopOnlyStopsOurStreamAndSaysWhenItDoesNot(t *testing.T) {
 	s, st, h := setup(t)
 	ctx := context.Background()
 	st.set = store.Settings{Soundscape: "night", Player: "media_player.bedroom"}
 	h.states["media_player.bedroom"] = ha.PlayerState{State: "playing", MediaContentID: "spotify:track:1"}
-	if err := s.Stop(ctx); err != nil {
-		t.Fatal(err)
+	err := s.Stop(ctx)
+	if err == nil || !strings.Contains(err.Error(), "left alone") {
+		t.Fatalf("Stop on a speaker playing something else = %v, want an explanation", err)
 	}
 	if strings.Contains(h.log(), "stop") {
 		t.Fatalf("stopped a speaker that was playing something else: %s", h.log())
+	}
+	if got := s.State(); got.Playing || !got.PlayerPlaying {
+		t.Fatalf("%+v", got)
+	}
+	// Idle speaker: nothing to do, and that is not an error.
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "idle"}
+	if err := s.Stop(ctx); err != nil || strings.Contains(h.log(), "stop") {
+		t.Fatalf("Stop on an idle speaker = %v (%s)", err, h.log())
 	}
 	if err := s.Play(ctx, "", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.log(), "stop media_player.bedroom") {
+		t.Fatalf("calls: %s", h.log())
+	}
+}
+
+// Some players (a Cast speaker) say they are playing but never say what. That is the real speaker this was
+// first tried on: Stop used to do nothing there, silently.
+func TestAPlayerThatDoesNotSayWhatItPlaysIsOursOnlyIfWeStartedIt(t *testing.T) {
+	s, st, h := setup(t)
+	ctx := context.Background()
+	st.set = store.Settings{Soundscape: "night", Player: "media_player.bedroom"}
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "playing"} // no media_content_id
+	_ = s.refresh(ctx, false)
+	if got := s.State(); got.Playing || !got.PlayerPlaying {
+		t.Fatalf("playing something unidentified and not started by us: %+v", got)
+	}
+
+	h.quiet = true // Play makes the fake report "playing" with no media id, like that speaker
+	if err := s.Play(ctx, "night", "media_player.bedroom"); err != nil {
+		t.Fatal(err)
+	}
+	_ = s.refresh(ctx, false)
+	if got := s.State(); !got.Playing || got.NowPlaying != "night" {
+		t.Fatalf("started by us and reported playing, but not recognised: %+v", got)
+	}
+	if err := s.Stop(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(h.log(), "stop media_player.bedroom") {
+		t.Fatalf("Stop did not stop it: %s", h.log())
+	}
+	_ = s.refresh(ctx, false)
+	if got := s.State(); got.Playing || got.PlayerPlaying {
+		t.Fatalf("still playing after Stop: %+v", got)
+	}
+
+	// Something else starts later on the same speaker, still unidentified: it is not ours any more.
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "playing"}
+	_ = s.refresh(ctx, false)
+	if got := s.State(); got.Playing {
+		t.Fatalf("claimed something we did not start: %+v", got)
+	}
+}
+
+func TestOurNoteExpiresIfTheSpeakerNeverPlayed(t *testing.T) {
+	s, st, h := setup(t)
+	ctx := context.Background()
+	st.set = store.Settings{Soundscape: "night", Player: "media_player.bedroom"}
+	h.quiet = true
+	_ = s.Play(ctx, "night", "media_player.bedroom")
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "idle"} // it never started
+	_ = s.refresh(ctx, false)
+	s.mu.Lock()
+	n := s.started["media_player.bedroom"]
+	n.at = time.Now().Add(-2 * startedGrace)
+	s.started["media_player.bedroom"] = n
+	s.mu.Unlock()
+	_ = s.refresh(ctx, false)
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "playing"}
+	_ = s.refresh(ctx, false)
+	if got := s.State(); got.Playing {
+		t.Fatalf("a stale note made something else look like ours: %+v", got)
+	}
+}
+
+func TestForceStopStopsWhateverIsPlaying(t *testing.T) {
+	s, st, h := setup(t)
+	ctx := context.Background()
+	if err := s.ForceStop(ctx); err == nil {
+		t.Error("ForceStop with no player chosen should say so")
+	}
+	st.set = store.Settings{Soundscape: "night", Player: "media_player.bedroom"}
+	h.states["media_player.bedroom"] = ha.PlayerState{State: "playing", MediaContentID: "spotify:track:1"}
+	if err := s.ForceStop(ctx); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(h.log(), "stop media_player.bedroom") {

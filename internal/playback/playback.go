@@ -42,16 +42,27 @@ type Options struct {
 
 // State is everything a front shows.
 type State struct {
-	HAConfigured bool        `json:"haConfigured"`
-	HAError      string      `json:"haError,omitempty"` // the last problem talking to Home Assistant
-	Soundscape   string      `json:"soundscape"`        // chosen soundscape ID, "" for none
-	Player       string      `json:"player"`            // chosen player entity ID, "" for none
-	Players      []ha.Player `json:"players"`
-	StreamURL    string      `json:"streamUrl"`  // of the chosen soundscape; "" if none or no public URL
-	Streamable   bool        `json:"streamable"` // a soundscape is chosen and a player could reach it
-	Playing      bool        `json:"playing"`    // the chosen player is playing the chosen soundscape's stream
-	NowPlaying   string      `json:"nowPlaying"` // that soundscape's ID while Playing, otherwise ""
+	HAConfigured  bool        `json:"haConfigured"`
+	HAError       string      `json:"haError,omitempty"` // the last problem talking to Home Assistant
+	Soundscape    string      `json:"soundscape"`        // chosen soundscape ID, "" for none
+	Player        string      `json:"player"`            // chosen player entity ID, "" for none
+	Players       []ha.Player `json:"players"`
+	StreamURL     string      `json:"streamUrl"`     // of the chosen soundscape; "" if none or no public URL
+	Streamable    bool        `json:"streamable"`    // a soundscape is chosen and a player could reach it
+	Playing       bool        `json:"playing"`       // the chosen player is playing the chosen soundscape's stream
+	PlayerPlaying bool        `json:"playerPlaying"` // the chosen player is playing something, ours or not
+	NowPlaying    string      `json:"nowPlaying"`    // that soundscape's ID while Playing, otherwise ""
 }
+
+// started notes that we told a player to play a stream. Some players (a Cast speaker, say) never report what
+// they are playing, so "playing, and we started it" is the best evidence that it is ours.
+type started struct {
+	url string
+	at  time.Time
+}
+
+// startedGrace is how long a player may take to begin (or to report it has) before the note is dropped.
+const startedGrace = 30 * time.Second
 
 // Service holds the choices and keeps track of the player.
 type Service struct {
@@ -68,6 +79,7 @@ type Service struct {
 	pstate    ha.PlayerState
 	pstateOf  string // the player pstate belongs to
 	haErr     string
+	started   map[string]started // players we told to play and have not stopped, by entity ID
 	changed   chan struct{}
 	kick      chan struct{}
 }
@@ -91,7 +103,7 @@ func New(sc Soundscapes, h HA, opt Options) (*Service, error) {
 		}
 		base = strings.TrimRight(opt.PublicURL, "/")
 	}
-	return &Service{sc: sc, ha: h, opt: opt, base: base, changed: make(chan struct{}), kick: make(chan struct{}, 1)}, nil
+	return &Service{sc: sc, ha: h, opt: opt, base: base, changed: make(chan struct{}), kick: make(chan struct{}, 1), started: map[string]started{}}, nil
 }
 
 // Changed returns a channel that is closed the next time the state may have changed. Take a new one after
@@ -129,10 +141,18 @@ func (s *Service) stateLocked(set store.Settings) State {
 	}
 	st.StreamURL = s.streamURL(st.Soundscape)
 	st.Streamable = st.StreamURL != ""
-	if st.Streamable && st.Player != "" && s.pstateOf == st.Player &&
-		(s.pstate.State == "playing" || s.pstate.State == "buffering") && containsStream(s.pstate.MediaContentID, st.StreamURL) {
-		st.Playing = true
-		st.NowPlaying = st.Soundscape
+	if st.Player != "" && s.pstateOf == st.Player && (s.pstate.State == "playing" || s.pstate.State == "buffering") {
+		st.PlayerPlaying = true
+		switch {
+		case !st.Streamable:
+		case containsStream(s.pstate.MediaContentID, st.StreamURL):
+			st.Playing = true
+		case s.pstate.MediaContentID == "" && s.started[st.Player].url == st.StreamURL:
+			st.Playing = true // it does not say what it plays, but we started this stream on it
+		}
+		if st.Playing {
+			st.NowPlaying = st.Soundscape
+		}
 	}
 	return st
 }
@@ -258,12 +278,15 @@ func (s *Service) playLocked(ctx context.Context, soundscape, player string) err
 	if err := s.ha.Play(ctx, player, u); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	s.started[player] = started{url: u, at: time.Now()}
+	s.mu.Unlock()
 	s.pollSoon()
 	return nil
 }
 
 // Stop stops the chosen player, but only if it is playing our stream: a speaker that is playing something
-// else is left alone.
+// else is left alone, and the error says so rather than doing nothing silently.
 func (s *Service) Stop(ctx context.Context) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
@@ -274,12 +297,37 @@ func (s *Service) Stop(ctx context.Context) error {
 		return err
 	}
 	st := s.State()
-	if !st.Playing {
-		return nil
+	switch {
+	case st.Playing:
+		return s.stopLocked(ctx, st.Player)
+	case st.PlayerPlaying:
+		return errors.New("the speaker is playing something that is not identified as this soundscape, so it was left alone (use Stop speaker on the web page to stop it anyway)")
 	}
-	if err := s.ha.Stop(ctx, st.Player); err != nil {
+	return nil
+}
+
+// ForceStop stops the chosen player whatever it is playing. It is for an explicit request about a named
+// speaker, such as the Stop button on the web page.
+func (s *Service) ForceStop(ctx context.Context) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if s.ha == nil {
+		return errors.New("Home Assistant is not configured")
+	}
+	player := s.sc.Settings().Player
+	if player == "" {
+		return errors.New("no player is chosen")
+	}
+	return s.stopLocked(ctx, player)
+}
+
+func (s *Service) stopLocked(ctx context.Context, player string) error {
+	if err := s.ha.Stop(ctx, player); err != nil {
 		return err
 	}
+	s.mu.Lock()
+	delete(s.started, player)
+	s.mu.Unlock()
 	s.pollSoon()
 	return nil
 }
@@ -331,6 +379,11 @@ func (s *Service) refresh(ctx context.Context, force bool) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if player != "" && ps.State != "playing" && ps.State != "buffering" {
+		if st, ok := s.started[player]; ok && time.Since(st.at) > startedGrace {
+			delete(s.started, player) // it stopped (or never started): do not claim the next thing it plays
+		}
+	}
 	msg := ""
 	if firstErr != nil {
 		msg = firstErr.Error()

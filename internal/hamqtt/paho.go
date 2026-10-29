@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
@@ -98,9 +99,16 @@ type pahoLog struct {
 	level slog.Level
 }
 
-func (l pahoLog) Println(v ...interface{}) {
-	l.log.Log(context.Background(), l.level, "mqtt: "+fmt.Sprint(v...))
-}
-func (l pahoLog) Printf(format string, v ...interface{}) {
-	l.log.Log(context.Background(), l.level, "mqtt: "+fmt.Sprintf(format, v...))
+func (l pahoLog) Println(v ...interface{}) { l.emit(fmt.Sprint(v...)) }
+
+func (l pahoLog) Printf(format string, v ...interface{}) { l.emit(fmt.Sprintf(format, v...)) }
+
+// emit logs a message from the library. Its in-memory message store reports "wiped" and "message not found"
+// as warnings on every connect; they are not problems, so they are only shown when debugging.
+func (l pahoLog) emit(msg string) {
+	level := l.level
+	if strings.Contains(msg, "[store]") {
+		level = slog.LevelDebug
+	}
+	l.log.Log(context.Background(), level, "mqtt: "+msg)
 }

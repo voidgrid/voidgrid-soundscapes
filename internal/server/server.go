@@ -45,6 +45,7 @@ type Player interface {
 	SelectPlayer(ctx context.Context, id string) error
 	Play(ctx context.Context, soundscape, player string) error
 	Stop(ctx context.Context) error
+	ForceStop(ctx context.Context) error
 }
 
 // Store keeps the soundscape definitions.
@@ -474,10 +475,22 @@ func (s *server) playerPlay(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, s.play.State())
 }
 
+// playerStop stops the chosen speaker. Without "force" it only stops this program's own stream; the web page
+// sends {"force": true} because pressing Stop speaker is an explicit request about that speaker.
 func (s *server) playerStop(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Force bool `json:"force"`
+	}
+	if !decode(w, r, &b, true) {
+		return
+	}
 	ctx, cancel := context.WithTimeout(r.Context(), playTimeout)
 	defer cancel()
-	if err := s.play.Stop(ctx); err != nil {
+	stop := s.play.Stop
+	if b.Force {
+		stop = s.play.ForceStop
+	}
+	if err := stop(ctx); err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}

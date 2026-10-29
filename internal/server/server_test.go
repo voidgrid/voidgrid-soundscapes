@@ -717,3 +717,27 @@ func TestEventsCarryThePlayerState(t *testing.T) {
 type noWarn struct{}
 
 func (noWarn) Warn(string, ...any) {}
+
+func TestStopRefusesAForeignStreamUnlessForced(t *testing.T) {
+	h := &fakeHA{state: map[string]ha.PlayerState{"media_player.bedroom": {State: "playing", MediaContentID: "spotify:track:1"}}}
+	ts, _, pb := newTestServerHA(t, h)
+	go pb.Run(context.Background(), noWarn{})
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[]}`)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(pb.State().Players) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	do(t, "PUT", ts.URL+"/api/player", `{"soundscape":"night","player":"media_player.bedroom"}`)
+
+	resp, body := do(t, "POST", ts.URL+"/api/player/stop", ``)
+	if resp.StatusCode != 400 || !strings.Contains(string(body), "left alone") || strings.Contains(h.log(), "stop") {
+		t.Fatalf("plain stop = %d %s (HA: %s)", resp.StatusCode, body, h.log())
+	}
+	resp, body = do(t, "POST", ts.URL+"/api/player/stop", `{"force":true}`)
+	if resp.StatusCode != 200 || !strings.Contains(h.log(), "stop media_player.bedroom") {
+		t.Fatalf("forced stop = %d %s (HA: %s)", resp.StatusCode, body, h.log())
+	}
+	if resp, _ := do(t, "POST", ts.URL+"/api/player/stop", `{"forse":true}`); resp.StatusCode != 400 {
+		t.Errorf("a misspelt field was accepted: %d", resp.StatusCode)
+	}
+}

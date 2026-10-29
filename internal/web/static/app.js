@@ -169,15 +169,17 @@ function renderSpeaker(s) {
   pick.value = p.player || '';
   const here = p.playing && p.nowPlaying === s.id;
   const btn = $('speakerBtn');
-  btn.textContent = here ? 'Stop speaker' : 'Play on speaker';
+  btn.textContent = here ? 'Playing on speaker' : 'Play on speaker';
   btn.setAttribute('aria-pressed', String(here));
-  btn.disabled = !here && !p.player;
+  btn.disabled = here || !p.player;
+  $('speakerStop').hidden = !p.playerPlaying;   // shown whenever the speaker is playing anything
   const name = (p.players.find((x) => x.id === p.player) || {}).name || p.player;
   const other = p.playing && p.nowPlaying !== s.id ? state.soundscapes.find((x) => x.id === p.nowPlaying) : null;
   let text = '';
   if (p.haError) text = `Home Assistant: ${p.haError}`;
   else if (here) text = `Playing on ${name}.`;
   else if (other) text = `${name} is playing “${other.name}”. Play on speaker switches it to this one.`;
+  else if (p.playerPlaying) text = `${name} is playing something that is not identified as this soundscape. Stop speaker stops it.`;
   note.textContent = text;
   note.hidden = !text;
 }
@@ -362,11 +364,12 @@ $('playerPick').addEventListener('change', async (e) => {
 $('speakerBtn').addEventListener('click', async () => {
   const s = current();
   if (!s) return;
-  const p = state.player;
-  try {
-    if (p.playing && p.nowPlaying === s.id) await api('POST', 'api/player/stop', {});
-    else await api('POST', 'api/player/play', { soundscape: s.id, player: $('playerPick').value });
-  } catch (err) { toast(err.message); }
+  try { await api('POST', 'api/player/play', { soundscape: s.id, player: $('playerPick').value }); } catch (err) { toast(err.message); }
+});
+
+// Stop speaker is an explicit request about the chosen speaker, so it stops it whatever it is playing.
+$('speakerStop').addEventListener('click', async () => {
+  try { await api('POST', 'api/player/stop', { force: true }); } catch (err) { toast(err.message); }
 });
 
 // Choosing a sound in the Add menu puts it in the soundscape, switched on at half level.
