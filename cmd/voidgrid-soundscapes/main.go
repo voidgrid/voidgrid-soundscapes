@@ -11,7 +11,10 @@ import (
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/config"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/ha"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/hamqtt"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/playback"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/server"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
@@ -33,7 +36,7 @@ func main() {
 	var level slog.Level
 	_ = level.UnmarshalText([]byte(cfg.LogLevel))
 	log := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
-	log.Info("starting", "version", version)
+	log.Info("starting", "version", version, "config", cfg.String())
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -69,7 +72,31 @@ func main() {
 	}
 	log.Info("soundscapes loaded", "count", len(saved))
 
-	runErr := server.Run(ctx, cfg.Listen, server.New(lib, eng, soundscapes), log)
+	// Home Assistant: talking to it is optional, and so are the MQTT entities.
+	var haClient playback.HA
+	if cfg.HAURL != "" {
+		c, err := ha.New(cfg.HAURL, cfg.HAToken)
+		if err != nil {
+			log.Error("Home Assistant settings", "err", err)
+			os.Exit(2)
+		}
+		haClient = c
+	}
+	player, err := playback.New(soundscapes, haClient, playback.Options{PublicURL: cfg.PublicURL})
+	if err != nil {
+		log.Error("playback settings", "err", err)
+		os.Exit(2)
+	}
+	go player.Run(ctx, log)
+
+	if cfg.MQTTURL != "" {
+		ctl := hamqtt.New(player, soundscapes, hamqtt.Options{DeviceName: cfg.DeviceName, Prefix: cfg.DiscoveryPrefix, Version: version}, log)
+		disconnect := hamqtt.Dial(hamqtt.BrokerOptions{URL: cfg.MQTTURL, User: cfg.MQTTUser, Password: cfg.MQTTPassword}, ctl, log)
+		go ctl.Run(ctx)
+		defer disconnect()
+	}
+
+	runErr := server.Run(ctx, cfg.Listen, server.New(lib, eng, soundscapes, player), log)
 	if err := soundscapes.Close(); err != nil { // writes any change still waiting for its delay
 		log.Error("cannot save soundscapes", "err", err)
 		os.Exit(1)

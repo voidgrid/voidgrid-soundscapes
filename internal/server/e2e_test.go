@@ -18,6 +18,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/playback"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
@@ -111,7 +112,8 @@ func TestRealStreamLiveMixing(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer st.Close()
-	ts := httptest.NewServer(New(lib, eng, st))
+	pb, _ := playback.New(st, nil, playback.Options{})
+	ts := httptest.NewServer(New(lib, eng, st, pb))
 	defer ts.Close()
 
 	type tone struct {

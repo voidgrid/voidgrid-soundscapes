@@ -11,11 +11,14 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/ha"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/playback"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 )
 
@@ -69,6 +72,43 @@ func fakeEncoder(ctx context.Context) (*engine.Encoder, error) {
 
 func newTestServer(t *testing.T, layers ...library.Layer) (*httptest.Server, context.CancelFunc) {
 	t.Helper()
+	ts, cancel, _ := newTestServerHA(t, nil, layers...)
+	return ts, cancel
+}
+
+// fakeHA is Home Assistant for the player endpoints: playing makes the player report our stream.
+type fakeHA struct {
+	mu    sync.Mutex
+	calls []string
+	state map[string]ha.PlayerState
+}
+
+func (f *fakeHA) Players(context.Context) ([]ha.Player, error) {
+	return []ha.Player{{ID: "media_player.bedroom", Name: "Bedroom"}}, nil
+}
+func (f *fakeHA) State(_ context.Context, id string) (ha.PlayerState, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.state[id], nil
+}
+func (f *fakeHA) Play(_ context.Context, id, u string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "play "+id+" "+u)
+	f.state[id] = ha.PlayerState{State: "playing", MediaContentID: u}
+	return nil
+}
+func (f *fakeHA) Stop(_ context.Context, id string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, "stop "+id)
+	f.state[id] = ha.PlayerState{State: "idle"}
+	return nil
+}
+func (f *fakeHA) log() string { f.mu.Lock(); defer f.mu.Unlock(); return strings.Join(f.calls, "; ") }
+
+func newTestServerHA(t *testing.T, h playback.HA, layers ...library.Layer) (*httptest.Server, context.CancelFunc, *playback.Service) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	lib := fakeLib(layers)
@@ -89,9 +129,13 @@ func newTestServer(t *testing.T, layers ...library.Layer) (*httptest.Server, con
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = st.Close() })
-	ts := httptest.NewServer(New(lib, eng, st))
+	pb, err := playback.New(st, h, playback.Options{PublicURL: "http://192.168.1.117:8007", Settle: time.Millisecond})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(New(lib, eng, st, pb))
 	t.Cleanup(ts.Close)
-	return ts, cancel
+	return ts, cancel, pb
 }
 
 func layerOf(id string) library.Layer {
@@ -551,7 +595,8 @@ func TestEventStreamEndsWhenTheServerShutsDown(t *testing.T) {
 	eng := engine.New(ctx, lib, engine.Options{}, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
 	st, _ := store.Open(t.TempDir(), 0, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
 	defer st.Close()
-	srv.Config.Handler = New(lib, eng, st)
+	pb, _ := playback.New(st, nil, playback.Options{})
+	srv.Config.Handler = New(lib, eng, st, pb)
 	srv.Config.BaseContext = func(net.Listener) context.Context { return ctx }
 	srv.Start()
 	defer srv.Close()
@@ -597,3 +642,78 @@ func TestWebPageIsServedWithItsAssets(t *testing.T) {
 		t.Errorf("unknown path = %d", resp.StatusCode)
 	}
 }
+
+// --- player -------------------------------------------------------------------------------------------
+
+func TestPlayerWithoutHomeAssistant(t *testing.T) {
+	ts, _ := newTestServer(t)
+	_, body := do(t, "GET", ts.URL+"/api/player", "")
+	if !strings.Contains(string(body), `"haConfigured":false`) {
+		t.Fatalf("GET /api/player = %s", body)
+	}
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[]}`)
+	if resp, body := do(t, "POST", ts.URL+"/api/player/play", `{"soundscape":"night","player":"media_player.x"}`); resp.StatusCode != 400 || !strings.Contains(string(body), "not configured") {
+		t.Fatalf("play = %d %s", resp.StatusCode, body)
+	}
+	// Choosing a soundscape still works and is remembered.
+	if resp, body := do(t, "PUT", ts.URL+"/api/player", `{"soundscape":"night"}`); resp.StatusCode != 200 || !strings.Contains(string(body), `"soundscape":"night"`) || !strings.Contains(string(body), `"streamable":true`) {
+		t.Fatalf("select = %d %s", resp.StatusCode, body)
+	}
+}
+
+func TestPlayerChooseAndPlayAndStop(t *testing.T) {
+	h := &fakeHA{state: map[string]ha.PlayerState{}}
+	ts, _, pb := newTestServerHA(t, h)
+	// The service reads the list of players when it runs; do one read by hand.
+	go pb.Run(context.Background(), noWarn{})
+	do(t, "PUT", ts.URL+"/api/soundscapes/night", `{"layers":[]}`)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(pb.State().Players) == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	if resp, body := do(t, "PUT", ts.URL+"/api/player", `{"soundscape":"night","player":"media_player.bedroom"}`); resp.StatusCode != 200 {
+		t.Fatalf("select = %d %s", resp.StatusCode, body)
+	}
+	if resp, _ := do(t, "PUT", ts.URL+"/api/player", `{"player":"media_player.nope"}`); resp.StatusCode != 400 {
+		t.Errorf("unknown player = %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, "PUT", ts.URL+"/api/player", `{"soundscape":"nope"}`); resp.StatusCode != 400 {
+		t.Errorf("unknown soundscape = %d", resp.StatusCode)
+	}
+	if resp, body := do(t, "POST", ts.URL+"/api/player/play", ``); resp.StatusCode != 200 {
+		t.Fatalf("play = %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(h.log(), "play media_player.bedroom http://192.168.1.117:8007/stream/night") {
+		t.Fatalf("Home Assistant was sent: %s", h.log())
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for !pb.State().Playing && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !pb.State().Playing {
+		t.Fatal("never saw the player playing")
+	}
+	if resp, body := do(t, "POST", ts.URL+"/api/player/stop", ``); resp.StatusCode != 200 {
+		t.Fatalf("stop = %d %s", resp.StatusCode, body)
+	}
+	if !strings.Contains(h.log(), "stop media_player.bedroom") {
+		t.Fatalf("Home Assistant was sent: %s", h.log())
+	}
+}
+
+func TestEventsCarryThePlayerState(t *testing.T) {
+	ts, _ := newTestServer(t)
+	resp, err := http.Get(ts.URL + "/api/events")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if first := readEvent(t, bufio.NewReader(resp.Body)); !strings.Contains(first, `"player":{"haConfigured":false`) {
+		t.Fatalf("first event: %s", first)
+	}
+}
+
+type noWarn struct{}
+
+func (noWarn) Warn(string, ...any) {}

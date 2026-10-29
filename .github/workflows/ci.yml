@@ -19,3 +19,6 @@ jobs:
         run: docker build --build-arg VERSION=ci -t voidgrid-soundscapes:ci .
       - name: Smoke test
         run: scripts/smoke.sh voidgrid-soundscapes:ci
+      # Uses the Go that the runner image already has to build the stub (scripts/stubha).
+      - name: Home Assistant integration test (throwaway Mosquitto and a stub Home Assistant)
+        run: scripts/integration.sh voidgrid-soundscapes:ci

@@ -11,7 +11,7 @@ const el = (tag, props = {}, ...kids) => {
   return e;
 };
 
-const state = { layers: [], soundscapes: [], loaded: false };
+const state = { layers: [], soundscapes: [], player: { haConfigured: false, players: [] }, loaded: false };
 
 const SEND_EVERY = 80;   // ms between slider updates while dragging
 const HOLD = 1500;       // ms a control keeps the value the user set before the server's value is shown again
@@ -57,6 +57,7 @@ function connect() {
     const data = JSON.parse(e.data);
     state.layers = data.layers;
     state.soundscapes = data.soundscapes;
+    state.player = data.player;
     state.loaded = true;
     setLive(true);
     render();
@@ -112,6 +113,7 @@ function renderCards() {
     const meta = el('span', { textContent: `${plural(s.layers.length, 'sound', 'sounds')}, ${on} on` });
     const kids = [el('strong', { textContent: s.name }), meta];
     if (s.listeners) kids.push(el('span', { className: 'on-air', textContent: ` · ${s.listeners} listening` }));
+    if (state.player.playing && state.player.nowPlaying === s.id) kids.push(el('span', { className: 'on-air', textContent: ' · ▶ playing on a speaker' }));
     return el('a', { className: 'card', href: `#/s/${encodeURIComponent(s.id)}` }, ...kids);
   }));
 }
@@ -137,6 +139,8 @@ function renderMixer(s) {
   }
   $('listeners').textContent = s.listeners === 0 ? 'nobody listening' : `${s.listeners} listening`;
 
+  renderSpeaker(s);
+
   // Only the sounds in this soundscape get a row, in the order they were added.
   const byId = new Map(state.layers.map((l) => [l.id, l]));
   const sig = JSON.stringify([s.id, s.layers.map((l) => { const lib = byId.get(l.id); return [l.id, lib ? lib.name : null, lib ? lib.category : null, lib ? lib.error || '' : null]; })]);
@@ -147,6 +151,35 @@ function renderMixer(s) {
   }
   for (const spec of s.layers) { const r = rows.get(spec.id); if (r) updateRow(r, spec); }
   renderAdd(s, byId);
+}
+
+// The speaker controls appear when the program can talk to Home Assistant.
+function renderSpeaker(s) {
+  const p = state.player;
+  $('speaker').hidden = !p.haConfigured;
+  const note = $('speakerNote');
+  if (!p.haConfigured) { note.hidden = true; return; }
+  const pick = $('playerPick');
+  const sig = JSON.stringify(p.players);
+  if (pick.dataset.sig !== sig) {
+    pick.dataset.sig = sig;
+    pick.replaceChildren(el('option', { value: '', textContent: p.players.length ? 'Choose a speaker…' : 'No speakers found' }),
+      ...p.players.map((x) => el('option', { value: x.id, textContent: x.name })));
+  }
+  pick.value = p.player || '';
+  const here = p.playing && p.nowPlaying === s.id;
+  const btn = $('speakerBtn');
+  btn.textContent = here ? 'Stop speaker' : 'Play on speaker';
+  btn.setAttribute('aria-pressed', String(here));
+  btn.disabled = !here && !p.player;
+  const name = (p.players.find((x) => x.id === p.player) || {}).name || p.player;
+  const other = p.playing && p.nowPlaying !== s.id ? state.soundscapes.find((x) => x.id === p.nowPlaying) : null;
+  let text = '';
+  if (p.haError) text = `Home Assistant: ${p.haError}`;
+  else if (here) text = `Playing on ${name}.`;
+  else if (other) text = `${name} is playing “${other.name}”. Play on speaker switches it to this one.`;
+  note.textContent = text;
+  note.hidden = !text;
 }
 
 // The Add menu lists the sounds that are in the library and not yet in this soundscape.
@@ -319,6 +352,20 @@ $('delete').addEventListener('click', async () => {
     await api('DELETE', `api/soundscapes/${encodeURIComponent(s.id)}`);
     state.soundscapes = state.soundscapes.filter((x) => x.id !== s.id);
     navigate(null);
+  } catch (err) { toast(err.message); }
+});
+
+$('playerPick').addEventListener('change', async (e) => {
+  try { await api('PUT', 'api/player', { player: e.target.value }); } catch (err) { toast(err.message); }
+});
+
+$('speakerBtn').addEventListener('click', async () => {
+  const s = current();
+  if (!s) return;
+  const p = state.player;
+  try {
+    if (p.playing && p.nowPlaying === s.id) await api('POST', 'api/player/stop', {});
+    else await api('POST', 'api/player/play', { soundscape: s.id, player: $('playerPick').value });
   } catch (err) { toast(err.message); }
 });
 

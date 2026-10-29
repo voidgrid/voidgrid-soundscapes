@@ -18,6 +18,7 @@ import (
 
 	"github.com/voidgrid/voidgrid-soundscapes/internal/engine"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/library"
+	"github.com/voidgrid/voidgrid-soundscapes/internal/playback"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/store"
 	"github.com/voidgrid/voidgrid-soundscapes/internal/web"
 )
@@ -34,6 +35,16 @@ type Mixes interface {
 	List() []engine.Status
 	Subscribe(id string) (*engine.Listener, error)
 	Remove(id string) bool
+}
+
+// Player is the part of the playback service the server uses.
+type Player interface {
+	State() playback.State
+	Changed() <-chan struct{}
+	SelectSoundscape(ctx context.Context, id string) error
+	SelectPlayer(ctx context.Context, id string) error
+	Play(ctx context.Context, soundscape, player string) error
+	Stop(ctx context.Context) error
 }
 
 // Store keeps the soundscape definitions.
@@ -57,6 +68,7 @@ type server struct {
 	lib   Layers
 	mixes Mixes
 	store Store
+	play  Player
 
 	// mu makes each change to a soundscape (store and engine together) one step, so two requests for the
 	// same soundscape cannot leave the engine playing one and the file holding the other.
@@ -82,8 +94,8 @@ func (s *server) changes() <-chan struct{} {
 }
 
 // New returns the HTTP handler.
-func New(lib Layers, mixes Mixes, st Store) http.Handler {
-	s := &server{lib: lib, mixes: mixes, store: st, changed: make(chan struct{})}
+func New(lib Layers, mixes Mixes, st Store, play Player) http.Handler {
+	s := &server{lib: lib, mixes: mixes, store: st, play: play, changed: make(chan struct{})}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.health)
 	mux.HandleFunc("GET /api/layers", s.layers)
@@ -94,6 +106,10 @@ func New(lib Layers, mixes Mixes, st Store) http.Handler {
 	mux.HandleFunc("POST /api/soundscapes/{id}/duplicate", s.duplicate)
 	mux.HandleFunc("DELETE /api/soundscapes/{id}", s.remove)
 	mux.HandleFunc("PATCH /api/soundscapes/{id}/layers", s.patchLayer)
+	mux.HandleFunc("GET /api/player", s.playerState)
+	mux.HandleFunc("PUT /api/player", s.playerSelect)
+	mux.HandleFunc("POST /api/player/play", s.playerPlay)
+	mux.HandleFunc("POST /api/player/stop", s.playerStop)
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("GET /", web.Handler())
 	mux.HandleFunc("GET /stream/{id}", s.stream)
@@ -405,14 +421,79 @@ func (s *server) patchLayer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, v)
 }
 
+// playTimeout bounds a command to Home Assistant made for the web page.
+const playTimeout = 30 * time.Second
+
+func (s *server) playerState(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, s.play.State())
+}
+
+// playerSelect sets the chosen soundscape and/or player. A field left out is left alone; "" clears it.
+func (s *server) playerSelect(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Soundscape *string `json:"soundscape"`
+		Player     *string `json:"player"`
+	}
+	if !decode(w, r, &b, false) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), playTimeout)
+	defer cancel()
+	if b.Soundscape != nil {
+		if err := s.play.SelectSoundscape(ctx, *b.Soundscape); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	if b.Player != nil {
+		if err := s.play.SelectPlayer(ctx, *b.Player); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
+	s.notify()
+	writeJSON(w, http.StatusOK, s.play.State())
+}
+
+// playerPlay starts a soundscape on a player; either may be left out to use the current choice.
+func (s *server) playerPlay(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Soundscape string `json:"soundscape"`
+		Player     string `json:"player"`
+	}
+	if !decode(w, r, &b, true) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), playTimeout)
+	defer cancel()
+	if err := s.play.Play(ctx, b.Soundscape, b.Player); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.notify()
+	writeJSON(w, http.StatusOK, s.play.State())
+}
+
+func (s *server) playerStop(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), playTimeout)
+	defer cancel()
+	if err := s.play.Stop(ctx); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.notify()
+	writeJSON(w, http.StatusOK, s.play.State())
+}
+
 // snapshot is everything the web page shows.
 type snapshot struct {
 	Layers      []library.Layer `json:"layers"`
 	Soundscapes []view          `json:"soundscapes"`
+	Player      playback.State  `json:"player"`
 }
 
 func (s *server) snapshot() ([]byte, error) {
-	snap := snapshot{Layers: s.lib.Layers(), Soundscapes: []view{}}
+	snap := snapshot{Layers: s.lib.Layers(), Soundscapes: []view{}, Player: s.play.State()}
 	if snap.Layers == nil {
 		snap.Layers = []library.Layer{}
 	}
@@ -443,7 +524,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 	defer poll.Stop()
 	quiet := time.Now()
 	for {
-		wake := s.changes() // taken before the snapshot, so a change made during it is not missed
+		wake, playWake := s.changes(), s.play.Changed() // taken before the snapshot, so a change made during it is not missed
 		data, err := s.snapshot()
 		if err != nil {
 			return
@@ -468,6 +549,7 @@ func (s *server) events(w http.ResponseWriter, r *http.Request) {
 		}
 		select {
 		case <-wake:
+		case <-playWake:
 		case <-poll.C:
 		case <-r.Context().Done():
 			return

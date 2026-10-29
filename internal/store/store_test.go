@@ -243,3 +243,38 @@ func TestNewIDAndSlug(t *testing.T) {
 		}
 	}
 }
+
+func TestSettingsSurviveARestartAndUnchangedSettingsWriteNothing(t *testing.T) {
+	dir := t.TempDir()
+	s := open(t, dir, time.Hour)
+	s.SetSettings(Settings{}) // unchanged: nothing to save
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dir, FileName)); !os.IsNotExist(err) {
+		t.Fatalf("an unchanged setting wrote a file: %v", err)
+	}
+
+	s = open(t, dir, time.Hour)
+	s.Put(sample("night"))
+	s.SetSettings(Settings{Soundscape: "night", Player: "media_player.bedroom"})
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	again := open(t, dir, time.Hour)
+	if got := again.Settings(); got != (Settings{Soundscape: "night", Player: "media_player.bedroom"}) {
+		t.Fatalf("settings after restart: %+v", got)
+	}
+}
+
+func TestFileWrittenBeforeSettingsExistedStillOpens(t *testing.T) {
+	dir := t.TempDir()
+	old := `{"version":1,"soundscapes":[{"id":"a","name":"A","layers":[]}]}`
+	if err := os.WriteFile(filepath.Join(dir, FileName), []byte(old), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	s := open(t, dir, time.Hour)
+	if len(s.List()) != 1 || s.Settings() != (Settings{}) {
+		t.Fatalf("got %+v, %+v", s.List(), s.Settings())
+	}
+}

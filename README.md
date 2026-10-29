@@ -51,6 +51,13 @@ Settings are environment variables:
 | `VOIDGRID_SOUNDSCAPES_CONFIG_DIR` | `/soundscapes/config` | Where soundscapes and settings are stored |
 | `VOIDGRID_SOUNDSCAPES_LOG_LEVEL` | `info` | `debug`, `info`, `warn` or `error` |
 | `VOIDGRID_SOUNDSCAPES_SCAN_INTERVAL` | `10s` | How often the audio directory is rescanned for new, changed or removed files (at least `1s`) |
+| `VOIDGRID_SOUNDSCAPES_PUBLIC_URL` | (unset) | How a speaker reaches this program, such as `http://192.168.1.117:8007` (a scheme and host, no path). Needed to play on a speaker, because the container cannot know its own LAN address |
+| `VOIDGRID_SOUNDSCAPES_HA_URL` | (unset) | Home Assistant, such as `http://192.168.1.211:8123`. Set it together with `HA_TOKEN` to list and control media players |
+| `VOIDGRID_SOUNDSCAPES_HA_TOKEN` | (unset) | A Home Assistant long-lived access token. A secret: it is never logged or saved |
+| `VOIDGRID_SOUNDSCAPES_MQTT_URL` | (unset) | MQTT broker, such as `tcp://192.168.1.211:1883` (`ssl://` for TLS). Unset means no Home Assistant entities |
+| `VOIDGRID_SOUNDSCAPES_MQTT_USER`, `..._MQTT_PASSWORD` | (unset) | Broker credentials. The password is a secret and is never logged |
+| `VOIDGRID_SOUNDSCAPES_DEVICE_NAME` | `Voidgrid Soundscapes` | The device name in Home Assistant; the entity IDs, topics and MQTT client ID derive from it. Give a second instance, or one beside another tool, a different name |
+| `VOIDGRID_SOUNDSCAPES_DISCOVERY_PREFIX` | `homeassistant` | Home Assistant's MQTT discovery prefix |
 | `VOIDGRID_SOUNDSCAPES_LOOP_CROSSFADE` | `1500ms` | Length of the crossfade that joins the end of a layer's audio to its start when it loops (`0s` to `10s`; `0s` is a hard cut) |
 
 ### Your audio folder
@@ -68,6 +75,23 @@ Open `http://<host>:8007/`. The landing page is a card for each saved soundscape
 
 The page has no login (the plan is a trusted LAN or your own reverse proxy), and its scripts and styles are all served by the program itself.
 
+### Home Assistant
+
+Nothing here is needed to mix and stream. With `HA_URL`, `HA_TOKEN` and `PUBLIC_URL` set, the mixer page gets a speaker picker and a **Play on speaker** button: the program lists your `media_player` entities and calls `media_player.play_media` with the soundscape's stream URL (and `media_player.media_stop` to stop). The audio still never passes through Home Assistant; the speaker fetches the stream from this program. **Stop speaker** only stops a speaker that is playing this program's stream, never one playing something else. Whether a speaker is playing is read back from the speaker, not assumed. If the speaker is playing a soundscape and you choose another, it is pointed at the new one.
+
+With `MQTT_URL` set as well, one device appears in Home Assistant through MQTT discovery (nothing to configure there), with these entities (the IDs shown are for the default device name):
+
+| Entity | What it does |
+|---|---|
+| `select.voidgrid_soundscapes_soundscape` | Choose the soundscape (the options are your soundscapes' names) |
+| `select.voidgrid_soundscapes_player` | Choose the speaker (the options are your media players) |
+| `switch.voidgrid_soundscapes_playing` | On: play the chosen soundscape on the chosen speaker. Off: stop it. Shows what the speaker is really doing |
+| `sensor.voidgrid_soundscapes_stream_url` | The chosen soundscape's stream URL |
+| `binary_sensor.voidgrid_soundscapes_streamable` | On when a soundscape is chosen and `PUBLIC_URL` is set, so a speaker could be told to play it |
+| `sensor.voidgrid_soundscapes_now_playing` | The soundscape being played on the speaker, if any |
+
+The entities go unavailable if the program stops (the broker publishes a last will). The broker user needs read and write on `voidgrid-soundscapes/#` and `homeassistant/#`. Each entity's state is retained on the broker, and Home Assistant's own restart is noticed (it announces itself on `homeassistant/status`) and the discovery messages are sent again. The chosen soundscape and speaker are saved with the soundscapes. Mixing the layers is done on the web page; there is no per-layer entity.
+
 ### Soundscapes and streaming
 
 A soundscape is a named mix of layers, each with a level from 0 to 1 and an on/off switch. Define one by sending the whole mix; sending it again is harmless, and you can send it while someone is listening to hear the change live:
@@ -80,6 +104,8 @@ curl -X PUT http://localhost:8007/api/soundscapes/night -d '{"layers": [
 ```
 
 To change one layer without sending the whole mix (this is what the web page does, so two browsers adjusting different layers do not overwrite each other): `PATCH /api/soundscapes/night/layers` with `{"id": "rain/heavy.mp3", "level": 0.4}`, `{"id": "...", "enabled": true}` or `{"id": "...", "remove": true}`. A layer that is not yet in the soundscape is added (from the library only), at level 0.5 and off unless you say otherwise. `GET /api/events` is a server-sent-events feed of the whole state (layers and soundscapes), sent on connect and whenever it changes.
+
+`GET /api/player` shows the chosen soundscape and speaker and whether it is playing; `PUT /api/player` (`{"soundscape": "night", "player": "media_player.bedroom"}`), `POST /api/player/play` and `POST /api/player/stop` are what the page uses.
 
 A soundscape has a fixed ID (part of its stream URL) and a name you can change. `PUT` can also carry `"name"`; a field left out keeps its current value, so `{"name": "Sleep"}` renames without touching the mix. Other calls: `POST /api/soundscapes` with `{"name": "Night rain"}` (and optionally `"layers"`) creates one and picks the ID (`night-rain`); `POST /api/soundscapes/night/duplicate` (optionally `{"name": "..."}`) copies one; `DELETE /api/soundscapes/night` removes it and disconnects anyone listening.
 

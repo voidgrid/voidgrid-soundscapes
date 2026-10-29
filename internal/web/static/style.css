@@ -53,6 +53,8 @@ button.danger.primary, #dialogOk.danger { background: var(--danger); color: var(
 a { color: var(--accent); }
 :focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 
+.speaker { margin-top: 4px; }
+.speaker button { white-space: nowrap; }
 .info { font-size: .85rem; color: var(--muted); display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: center; }
 .info input { min-height: 32px; font-size: .85rem; width: min(100%, 22rem); }
 .info button { min-height: 32px; font-size: .85rem; padding: 0 10px; }

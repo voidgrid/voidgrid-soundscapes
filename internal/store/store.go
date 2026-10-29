@@ -38,8 +38,16 @@ type Soundscape struct {
 	Layers []engine.LayerSpec `json:"layers"`
 }
 
+// Settings is what the program remembers besides the soundscapes: which soundscape and which player Home
+// Assistant (or the web page) is working with. Empty means none chosen.
+type Settings struct {
+	Soundscape string `json:"soundscape,omitempty"`
+	Player     string `json:"player,omitempty"`
+}
+
 type file struct {
 	Version     int          `json:"version"`
+	Settings    Settings     `json:"settings"`
 	Soundscapes []Soundscape `json:"soundscapes"`
 }
 
@@ -51,6 +59,7 @@ type Store struct {
 
 	mu     sync.Mutex
 	items  map[string]Soundscape
+	set    Settings
 	timer  *time.Timer // set while a write is waiting
 	dirty  bool        // changes not yet written
 	closed bool
@@ -92,6 +101,7 @@ func Open(dir string, delay time.Duration, log *slog.Logger) (*Store, error) {
 	if f.Version < 1 || f.Version > Version {
 		return nil, fmt.Errorf("%s has schema version %d; this build understands up to %d (it has not been changed)", s.path, f.Version, Version)
 	}
+	s.set = f.Settings
 	for _, sc := range f.Soundscapes {
 		if !engine.ValidID(sc.ID) {
 			return nil, fmt.Errorf("%s: %q is not a valid soundscape ID (it has not been changed)", s.path, sc.ID)
@@ -160,6 +170,24 @@ func (s *Store) Delete(id string) bool {
 	delete(s.items, id)
 	s.dirtyLocked()
 	return true
+}
+
+// Settings returns the remembered choices.
+func (s *Store) Settings() Settings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.set
+}
+
+// SetSettings replaces the remembered choices and schedules a write.
+func (s *Store) SetSettings(set Settings) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.set == set {
+		return
+	}
+	s.set = set
+	s.dirtyLocked()
 }
 
 // NewID returns an unused ID made from name, such as "night-rain" for "Night rain".
@@ -234,7 +262,7 @@ func (s *Store) Flush() error {
 	s.writeMu.Lock()
 	defer s.writeMu.Unlock()
 	s.mu.Lock()
-	data, err := json.MarshalIndent(file{Version: Version, Soundscapes: s.listLocked()}, "", "  ")
+	data, err := json.MarshalIndent(file{Version: Version, Settings: s.set, Soundscapes: s.listLocked()}, "", "  ")
 	s.dirty = false
 	s.mu.Unlock()
 	if err != nil {
