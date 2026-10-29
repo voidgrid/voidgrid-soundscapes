@@ -6,41 +6,69 @@ I want to have rain, waves, or anything else I want to fall asleep to, and be ab
 
 I wrote this using Claude. The design is mine (what a soundscape is, how folders work, how Home Assistant fits in, what V1 includes and leaves out); a lot of the code is Claude's. I'm also learning Go as I go, and I'll be reading all of the code, over time, after it has been written here. Until I have, don't take my word for it that the code is good: read it before you trust it, especially if it is going anywhere near a speaker in a room where someone is asleep. It is a one person plus AI project and I would rather be upfront about that than have you find out later.
 
-It is also very early. **Right now it does almost nothing.** The program scans your audio folder, mixes and streams soundscapes over HTTP, saves them, and has a web page to mix them on. There is no Home Assistant integration yet, so nothing tells a speaker to play: you give a player the stream URL yourself. The mixing was first proven in a throwaway prototype (a few files looped and mixed with live level changes, played on a real speaker through Home Assistant and Music Assistant). There is no release and no published image.
+It is also very early: this is a beta. The mixing, the web page and saving are tested, including against a real speaker in an earlier prototype. The Home Assistant side (the speaker control and the MQTT entities) is tested against a stub Home Assistant and a throwaway MQTT broker, **not yet against a real Home Assistant**, so expect rough edges there. Releases are tagged betas (see [Image tags](#image-tags)).
 
-## What it is going to be
+## What it is
 
 - A **layer** is one audio file (rain, waves, fire, a fan). A **soundscape** is a named set of layers, each with its own level and an on/off switch.
 - Each soundscape is served as one HTTP MP3 stream. Home Assistant only tells a media player to fetch the URL; the audio never passes through Home Assistant.
 - Your audio folder is organised by type (the first-level folder is the category, e.g. `rain/`, `waves/`), and the UI groups layers that way. Any format ffmpeg can read works.
-- You mix live in a built-in web page. A few MQTT entities (pick a soundscape, pick a player, play and stop) expose the basics to Home Assistant for automations.
+- You mix live in a built-in web page. A few MQTT entities (pick a soundscape, pick a player, play and stop) expose the basics to Home Assistant for automations, and the page can play a soundscape on any of your media players.
 - Built to be deployed with Docker. The container runs as a non-root user with every capability dropped.
 
 Not planned for V1: a Home Assistant custom card, YouTube downloads, and anything resembling auth inside the app (it is meant for your LAN, so put it behind your own reverse proxy if you need more). Those may come later.
 
 ## Requirements
 
-- Docker (and Docker Compose v2) on the machine that will run it. The container is the way this is meant to be deployed.
-- A folder of audio files. Short loops are fine; the engine is being built to loop them without a gap.
-- To play on a speaker: Home Assistant and a media player it can control that is able to fetch an HTTP URL, on a network the player can reach the container on.
-- To expose controls in Home Assistant (later): an MQTT broker.
+- Docker (and Docker Compose v2) on the machine that will run it. The container is the way this is meant to be deployed. There is nothing else to install: ffmpeg is bundled in the image (it is run as a separate program for decoding and for encoding the stream).
+- A folder of audio files. Short loops are fine; they are looped without a gap.
+- To play on a speaker: a media player that can fetch an HTTP URL and can reach the container over your network. Controlling it from here also needs Home Assistant (see [Home Assistant](#home-assistant)); without Home Assistant you can still give any player the stream URL yourself.
+- For the Home Assistant entities: an MQTT broker that Home Assistant uses.
 
-ffmpeg is bundled in the image and is run as a separate program for decoding and for encoding the stream.
+## Image tags
+
+The image is `ghcr.io/voidgrid/voidgrid-soundscapes` (linux/amd64):
+
+```sh
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:latest         # newest stable release (none yet)
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:beta           # newest release of any kind, pre-releases included
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0-beta.1  # one exact version, never moves
+```
+
+While this is in beta, use `:beta` to follow along or an exact version to stay put. A beta can change in ways that need a look at the release notes; your soundscapes live in the config folder, so keep a copy of it before moving to a newer image.
 
 ## Getting started
 
-There is nothing to install yet. You can build the image and check that it runs:
+Docker Compose, from the files in [examples/](examples/):
 
 ```sh
-docker build --build-arg VERSION=dev -t voidgrid-soundscapes:dev .
-docker run -d --name soundscapes --user 1000:1000 --cap-drop ALL \
-  --security-opt no-new-privileges:true --read-only -p 8007:8007 \
-  -v "$PWD/audio:/soundscapes/audio" -v "$PWD/config:/soundscapes/config" \
-  voidgrid-soundscapes:dev
+mkdir voidgrid-soundscapes && cd voidgrid-soundscapes
+curl -fsSLO https://raw.githubusercontent.com/voidgrid/voidgrid-soundscapes/main/examples/compose.yaml
+curl -fsSL  https://raw.githubusercontent.com/voidgrid/voidgrid-soundscapes/main/examples/env.example -o .env
+chmod 600 .env                       # it will hold a token and a password
+mkdir -p audio config
+chown 1000:1000 config               # the container runs as uid 1000 and writes soundscapes.json here
+$EDITOR .env                         # at least PUBLIC_URL, and put some sounds in ./audio
+docker compose up -d
 curl http://localhost:8007/healthz   # prints "ok"
 ```
 
-The `audio` and `config` directories need to be writable by uid 1000 (`chown 1000:1000`). Once the first release exists, this section will become a Compose example and a published image, `ghcr.io/voidgrid/voidgrid-soundscapes`.
+Then open `http://<host>:8007/`. The compose file runs the container the way it is built to run: as uid 1000, every capability dropped, `no-new-privileges`, a read-only root filesystem, and your audio folder mounted read-only. It has a health check (`docker compose ps` shows `healthy`). Plain `docker run` works too:
+
+```sh
+docker run -d --name voidgrid-soundscapes --restart unless-stopped \
+  --user 1000:1000 --cap-drop ALL --security-opt no-new-privileges:true --read-only \
+  -p 8007:8007 \
+  -e VOIDGRID_SOUNDSCAPES_PUBLIC_URL=http://192.168.1.10:8007 \
+  -v "$PWD/audio:/soundscapes/audio:ro" -v "$PWD/config:/soundscapes/config" \
+  ghcr.io/voidgrid/voidgrid-soundscapes:beta
+```
+
+- **Updating:** `docker compose pull && docker compose up -d`. Streams drop for a moment and players reconnect; soundscapes are kept in the config folder.
+- **Logs:** `docker compose logs -f`. They list what was configured (secrets are shown only as `set`), the audio library changes, and every stream start and stop.
+- **Memory:** every sound that is switched on in a saved soundscape is decoded into memory (about 5 MB per minute of audio). A library of a few hours of audio, mostly switched on, needs a few hundred MB. Sounds switched off are released after a couple of minutes.
+- **Network:** a speaker fetches `http://<PUBLIC_URL>/stream/<id>`, so `PUBLIC_URL` must be an address the *speaker* can reach (not `localhost`, not a Docker-internal name), and the port must be open between the two. The web page and the stream have **no login**; keep them on a trusted network or put your own reverse proxy in front. A proxy must not buffer (`/api/events` is a long-lived event stream and `/stream/<id>` never ends), and must not time those requests out.
+- **Storage:** the config folder holds one small file, `soundscapes.json`, written atomically. If it is damaged or was written by a newer version, the program refuses to start and names it rather than overwrite it.
 
 Settings are environment variables:
 
@@ -62,7 +90,7 @@ Settings are environment variables:
 
 ### Your audio folder
 
-Put audio files anywhere under the audio directory. Each file is a **layer**, identified by its path inside that directory (`rain/heavy.mp3`), so two files called `heavy.mp3` in different folders are two different layers. The first-level folder is the layer's category (`rain`), which the UI will use to group them; files directly in the root have no category.
+Put audio files anywhere under the audio directory. Each file is a **layer**, identified by its path inside that directory (`rain/heavy.mp3`), so two files called `heavy.mp3` in different folders are two different layers. The first-level folder is the layer's category (`rain`), which the page's Add menu uses to group them; files directly in the root have no category.
 
 - Recognised extensions: `mp3 wav flac ogg oga opus m4a aac wma aif aiff webm mp4`. Every file is checked with `ffprobe`; one that is not really audio is listed with an error and never mixed. `webm` and `mp4` may carry video: only the audio track is used, and a file with no audio track is reported as unusable. The tests build a tone in each of these formats and check it comes out of the stream at the right pitch, in the same Alpine ffmpeg the image ships.
 - Hidden files and folders (names starting with `.`) and anything else are ignored. A symlink to a file counts; a symlink to a folder is not followed.
@@ -119,6 +147,14 @@ The reply lists each layer's state: `ready`, `loading` (being decoded; silent un
 
 The container has a health check (`voidgrid-soundscapes healthcheck`), and invalid settings make it exit with code 2 and say which one.
 
+## Troubleshooting
+
+- **The page shows no sounds:** the audio folder is empty, not mounted where you expect, or unreadable by uid 1000 (a file only readable by its owner, say). `docker compose logs` says what the scan found (including how many files are unusable), and `curl http://localhost:8007/api/layers` lists every file with the reason for any that cannot be used. A file that is not really audio never appears in the page's Add menu.
+- **The container exits at once:** the log says why. Two common ones: the config folder is not writable by uid 1000 (`chown 1000:1000 config`), or a setting is invalid (the program exits with code 2 and names the variable).
+- **Play on speaker does nothing or fails:** the page shows Home Assistant's own error. Check `PUBLIC_URL` (the speaker must be able to open it; try the stream URL from the page in VLC on another machine), `HA_URL`/`HA_TOKEN`, and that the speaker is a `media_player` that accepts a URL.
+- **No Home Assistant entities:** the log says `connected to the MQTT broker` once it is in, and warns if the broker cannot be reached after 15 seconds; the MQTT library's own connection errors (a refused login, say) are logged too. The broker user needs read and write on `voidgrid-soundscapes/#` and `homeassistant/#`, and Home Assistant's MQTT discovery prefix must match `DISCOVERY_PREFIX`.
+- **Two entities with the same name, or an old tool's entities:** each device name gets its own entities. Give this one its own `DEVICE_NAME`.
+
 ## Development
 
 You need Go 1.22 or newer, or just Docker.
@@ -126,6 +162,7 @@ You need Go 1.22 or newer, or just Docker.
 - `go vet ./... && go test -race ./...` builds, vets and tests everything.
 - `gofmt -l cmd internal` must print nothing.
 - `docker build -t voidgrid-soundscapes:dev .` builds the image (Go 1.27 builder, Alpine runtime with ffmpeg).
+- `scripts/integration.sh <image>` runs the image against a throwaway Mosquitto broker and a stub Home Assistant API (`scripts/stubha`): discovery, commands, play and stop, restart, last will. It never touches a real broker or Home Assistant.
 - `scripts/smoke.sh <image>` boots an image the way it is meant to run (uid 1000, all capabilities dropped, read-only root) and checks it is healthy and that ffmpeg has the MP3 encoder.
 - The image build runs `gofmt`, `go vet` and `go test`, so a failing test fails the build. CI (on every push to `main` and every pull request) is just that build plus the smoke test.
 
@@ -139,7 +176,7 @@ IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:beta           # newest release of a
 IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0-beta.1  # one exact version, never moves
 ```
 
-A hyphen in the tag marks a pre-release: `v0.1.0-beta.1` moves only `:beta`, while `v0.1.0` moves `:latest` and `:beta`. Versioned tags never move. The image is Alpine with ffmpeg; the Go binary is static and will embed the web UI.
+A hyphen in the tag marks a pre-release: `v0.1.0-beta.1` moves only `:beta`, while `v0.1.0` moves `:latest` and `:beta`. Versioned tags never move. The image is Alpine with ffmpeg; the Go binary is static and embeds the web UI.
 
 ## Acknowledgement
 

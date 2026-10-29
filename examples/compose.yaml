@@ -1,0 +1,21 @@
+# voidgrid-soundscapes: copy this file and env.example (as .env) into a folder, edit .env, then
+#   docker compose up -d
+# See the README for what each setting does.
+services:
+  soundscapes:
+    image: ${VGS_IMAGE:-ghcr.io/voidgrid/voidgrid-soundscapes:beta}
+    container_name: voidgrid-soundscapes
+    restart: unless-stopped
+    # The image is built to run like this: not as root, no capabilities, nothing writable but the config folder.
+    user: "1000:1000"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    ports:
+      - "${VGS_PORT:-8007}:8007"
+    env_file: .env
+    volumes:
+      # Your sounds. Read-only: the program never writes here.
+      - ${VGS_AUDIO_DIR:-./audio}:/soundscapes/audio:ro
+      # Soundscapes and settings (soundscapes.json). Must be writable by uid 1000.
+      - ${VGS_CONFIG_DIR:-./config}:/soundscapes/config
