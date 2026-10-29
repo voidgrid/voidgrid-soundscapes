@@ -12,7 +12,9 @@ stubpid=""
 cleanup() {
   docker rm -f "$app" "$mqtt" >/dev/null 2>&1 || true
   [ -n "$stubpid" ] && kill "$stubpid" 2>/dev/null || true
-  rm -rf "$tmp"
+  # Files the container made belong to uid 1000, which may not be the host user (it is not on a CI runner).
+  docker run --rm --user 1000:1000 --entrypoint rm -v "$tmp:/work" "$image" -rf /work/audio /work/config >/dev/null 2>&1 || true
+  rm -rf "$tmp" 2>/dev/null || true
 }
 trap cleanup EXIT
 fail() { echo "integration: $*"; echo "--- app log ---"; docker logs "$app" 2>&1 | tail -30; exit 1; }

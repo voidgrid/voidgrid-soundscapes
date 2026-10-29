@@ -6,7 +6,13 @@ set -euo pipefail
 image=${1:?usage: scripts/smoke.sh <image>}
 name=vgs-smoke-$$
 dir=$(mktemp -d)
-cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; rm -rf "$dir"; }
+cleanup() {
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  # Files made inside the container belong to uid 1000, which may not be the host user (it is not on a CI
+  # runner), so remove them as that user before removing the directory.
+  docker run --rm --user 1000:1000 --entrypoint rm -v "$dir:/work" "$image" -rf /work/audio /work/config >/dev/null 2>&1 || true
+  rm -rf "$dir" 2>/dev/null || true
+}
 trap cleanup EXIT
 mkdir "$dir/audio" "$dir/config" && chmod 777 "$dir/audio" "$dir/config"
 
