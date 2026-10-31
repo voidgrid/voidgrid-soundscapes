@@ -150,7 +150,7 @@ func newFixture(t *testing.T, ids ...string) *fixture {
 	fx := &fixture{t: t, lib: newFakeLib(ids...), enc: &fakeEncoder{}, values: map[string]int16{}, cancel: cancel}
 	fx.e = New(ctx, fx.lib, Options{
 		Loop: testOpt,
-		Decode: func(_ context.Context, path string) ([]int16, error) {
+		Decode: func(_ context.Context, path string, _ float64) ([]int16, error) {
 			fx.calls.Add(1)
 			id := strings.TrimPrefix(path, "/fake/")
 			if id == "bad.mp3" {
@@ -293,7 +293,7 @@ func TestLoadingLayerIsSilentThenAudible(t *testing.T) {
 	defer cancel()
 	enc := &fakeEncoder{}
 	e := New(ctx, newFakeLib("slow.mp3"), Options{Loop: testOpt, NewEncoder: enc.factory, Grace: time.Second, Unpaced: true,
-		Decode: func(context.Context, string) ([]int16, error) { <-gate; return dc(100, 8000), nil }}, testLogger())
+		Decode: func(context.Context, string, float64) ([]int16, error) { <-gate; return dc(100, 8000), nil }}, testLogger())
 	st, _ := e.Apply("mix", Spec{Layers: []LayerSpec{{ID: "slow.mp3", Level: 1, Enabled: true}}})
 	if st.Layers[0].State != StateLoading {
 		t.Fatalf("state = %s, want loading", st.Layers[0].State)
@@ -310,7 +310,7 @@ func TestFailedLayerIsRetriedOnNextApply(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	e := New(ctx, newFakeLib("flaky.mp3"), Options{Loop: testOpt, NewEncoder: (&fakeEncoder{}).factory, Unpaced: true,
-		Decode: func(context.Context, string) ([]int16, error) {
+		Decode: func(context.Context, string, float64) ([]int16, error) {
 			if calls.Add(1) == 1 {
 				return nil, errors.New("disk hiccup")
 			}

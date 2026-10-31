@@ -205,3 +205,26 @@ func TestBuildLoopSumOfTonesAndNoise(t *testing.T) {
 		t.Fatalf("hum plus noise leaves the level range %.0f%%..%.0f%% of steady", 100*q/steady, 100*l/steady)
 	}
 }
+
+// The in-place build must produce exactly what the copying one does, for tonal and noisy audio, with and
+// without an aligned join, and for files too short to crossfade.
+func TestBuildLoopConsumingMatchesCopy(t *testing.T) {
+	for name, src := range map[string][]int16{
+		"tone":  sine(SampleRate*4, 220, 8000),
+		"short": sine(SampleRate/200, 220, 8000),
+		"tiny":  sine(5, 220, 8000),
+	} {
+		for _, opt := range []LoopOptions{DefaultLoopOptions, {Crossfade: 0, SilenceThreshold: 8}, {Crossfade: time.Second}} {
+			want, werr := BuildLoop(src, opt)
+			got, gerr := BuildLoopConsuming(append([]int16(nil), src...), opt)
+			if (werr == nil) != (gerr == nil) || len(got) != len(want) {
+				t.Fatalf("%s %+v: lengths %d vs %d, errors %v vs %v", name, opt, len(got), len(want), gerr, werr)
+			}
+			for i := range want {
+				if got[i] != want[i] {
+					t.Fatalf("%s %+v: sample %d is %d, want %d", name, opt, i, got[i], want[i])
+				}
+			}
+		}
+	}
+}

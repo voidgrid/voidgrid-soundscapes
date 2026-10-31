@@ -125,7 +125,7 @@ func TestEveryFormatProbesDecodesAndLoops(t *testing.T) {
 				t.Errorf("duration %.2f, want about 3 s", l.DurationSec)
 			}
 
-			pcm, err := FFmpegDecode(context.Background(), l.Path)
+			pcm, err := FFmpegDecode(context.Background(), l.Path, l.DurationSec)
 			if err != nil {
 				t.Fatal(err)
 			}

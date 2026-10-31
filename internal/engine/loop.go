@@ -38,6 +38,16 @@ var DefaultLoopOptions = LoopOptions{Crossfade: 1500 * time.Millisecond, Silence
 // Why: an MP3 decodes with silent padding at both ends, and some recordings carry a silent tail of their
 // own (one file measured 1.6 s). Looping the raw decode would drop out at every seam.
 func BuildLoop(pcm []int16, opt LoopOptions) ([]int16, error) {
+	return buildLoop(pcm, opt, false)
+}
+
+// BuildLoopConsuming is BuildLoop for a caller that is done with pcm: it builds the loop inside pcm's
+// own memory instead of a second copy, so pcm must not be used afterwards. The result is a slice of pcm.
+func BuildLoopConsuming(pcm []int16, opt LoopOptions) ([]int16, error) {
+	return buildLoop(pcm, opt, true)
+}
+
+func buildLoop(pcm []int16, opt LoopOptions, inPlace bool) ([]int16, error) {
 	a, b := 0, len(pcm)
 	for a < b && abs16(pcm[a]) <= opt.SilenceThreshold {
 		a++
@@ -55,6 +65,9 @@ func BuildLoop(pcm []int16, opt LoopOptions) ([]int16, error) {
 		x = len(src) / 3
 	}
 	if x < 2 {
+		if inPlace {
+			return src, nil
+		}
 		return append([]int16(nil), src...), nil
 	}
 
@@ -73,8 +86,15 @@ func BuildLoop(pcm []int16, opt LoopOptions) ([]int16, error) {
 	q -= shift
 	rho := correlation(src[:x], src[q:q+x])
 
-	out := make([]int16, q)
-	copy(out, src[:q])
+	// Only the first x samples change and they read src[i] and src[q+i]. x <= len/3 and shift <= len/4, so
+	// q >= 5/12 of the length is past x: writing in place never overwrites a sample that is still to be read.
+	var out []int16
+	if inPlace {
+		out = src[:q:q]
+	} else {
+		out = make([]int16, q)
+		copy(out, src[:q])
+	}
 	for i := 0; i < x; i++ {
 		t := float64(i) / float64(x)
 		in := (1-rho)*math.Sin(t*math.Pi/2) + rho*t

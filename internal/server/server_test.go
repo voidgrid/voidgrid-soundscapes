@@ -113,7 +113,7 @@ func newTestServerHA(t *testing.T, h playback.HA, layers ...library.Layer) (*htt
 	t.Cleanup(cancel)
 	lib := fakeLib(layers)
 	eng := engine.New(ctx, lib, engine.Options{
-		Decode: func(context.Context, string) ([]int16, error) {
+		Decode: func(context.Context, string, float64) ([]int16, error) {
 			s := make([]int16, 2000)
 			for i := range s {
 				s[i] = 5000

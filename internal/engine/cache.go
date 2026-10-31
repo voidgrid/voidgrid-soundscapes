@@ -83,9 +83,9 @@ func (c *Cache) load(e *entry, l library.Layer) {
 		e.err = c.ctx.Err()
 		return
 	}
-	pcm, err := c.decode(c.ctx, l.Path)
+	pcm, err := c.decode(c.ctx, l.Path, l.DurationSec)
 	if err == nil {
-		e.loop, err = BuildLoop(pcm, c.opt)
+		e.loop, err = BuildLoopConsuming(pcm, c.opt)
 	}
 	e.err = err
 	if err != nil {

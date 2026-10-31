@@ -26,7 +26,7 @@ var testOpt = LoopOptions{Crossfade: 0, SilenceThreshold: 0}
 
 func TestCacheDecodesOnceForManyHolders(t *testing.T) {
 	var calls atomic.Int32
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		calls.Add(1)
 		time.Sleep(20 * time.Millisecond)
 		return dc(4000, 500), nil
@@ -52,7 +52,7 @@ func TestCacheDecodesOnceForManyHolders(t *testing.T) {
 
 func TestCacheKeepsEntryBrieflyThenFreesIt(t *testing.T) {
 	var calls atomic.Int32
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		calls.Add(1)
 		return dc(100, 500), nil
 	}, testOpt, 60*time.Millisecond, testLogger())
@@ -81,7 +81,7 @@ func TestCacheKeepsEntryBrieflyThenFreesIt(t *testing.T) {
 
 func TestCacheForgetsFailuresAtOnce(t *testing.T) {
 	var calls atomic.Int32
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		if calls.Add(1) == 1 {
 			return nil, errors.New("corrupt")
 		}
@@ -106,7 +106,7 @@ func TestCacheForgetsFailuresAtOnce(t *testing.T) {
 
 func TestCacheNewEntryWhenFileChanges(t *testing.T) {
 	var calls atomic.Int32
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		calls.Add(1)
 		return dc(100, 500), nil
 	}, testOpt, time.Minute, testLogger())
@@ -122,7 +122,7 @@ func TestCacheNewEntryWhenFileChanges(t *testing.T) {
 }
 
 func TestCacheSilentFileIsAFailure(t *testing.T) {
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		return make([]int16, 1000), nil
 	}, DefaultLoopOptions, time.Minute, testLogger())
 	h := c.Acquire(layer("quiet.mp3"))
@@ -134,7 +134,7 @@ func TestCacheSilentFileIsAFailure(t *testing.T) {
 
 func TestCacheLimitsConcurrentDecodes(t *testing.T) {
 	var running, peak atomic.Int32
-	c := NewCache(context.Background(), func(context.Context, string) ([]int16, error) {
+	c := NewCache(context.Background(), func(context.Context, string, float64) ([]int16, error) {
 		n := running.Add(1)
 		for {
 			p := peak.Load()
