@@ -50,6 +50,12 @@ type Layer struct {
 	Codec       string    `json:"codec"`
 	SampleRate  int       `json:"sampleRate"`
 	Channels    int       `json:"channels"`
+	// Title, Artist, License and Comment come from the file's own tags, if it has any. Name stays the file
+	// name, so a file with no tags is shown as before; the page shows Title when there is one.
+	Title   string `json:"title,omitempty"`
+	Artist  string `json:"artist,omitempty"`
+	License string `json:"license,omitempty"`
+	Comment string `json:"comment,omitempty"`
 	// Error is set when the file could not be used (not audio, corrupt, unreadable). Such layers are listed so
 	// the UI can say so, but must not be mixed.
 	Error string `json:"error,omitempty"`
@@ -170,6 +176,7 @@ func (lib *Library) Scan(ctx context.Context) (Diff, error) {
 				lib.log.Warn("unusable audio file", "id", f.id, "err", perr)
 			} else {
 				l.DurationSec, l.Codec, l.SampleRate, l.Channels = info.Duration, info.Codec, info.SampleRate, info.Channels
+				l.Title, l.Artist, l.License, l.Comment = info.Title, info.Artist, info.License, info.Comment
 			}
 			mu.Lock()
 			next[f.id] = l

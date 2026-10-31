@@ -94,6 +94,7 @@ Settings are environment variables:
 Put audio files anywhere under the audio directory. Each file is a **layer**, identified by its path inside that directory (`rain/heavy.mp3`), so two files called `heavy.mp3` in different folders are two different layers. The first-level folder is the layer's category (`rain`), which the page's Add menu uses to group them; files directly in the root have no category.
 
 - Recognised extensions: `mp3 wav flac ogg oga opus m4a aac wma aif aiff webm mp4`. Every file is checked with `ffprobe`; one that is not really audio is listed with an error and never mixed. `webm` and `mp4` may carry video: only the audio track is used, and a file with no audio track is reported as unusable. The tests build a tone in each of these formats and check it comes out of the stream at the right pitch, in the same Alpine ffmpeg the image ships.
+- **Tags:** the title, artist, licence (`license` or `copyright`) and comment tags are read from the file with `ffprobe` (ID3, Vorbis/Opus comments, MP4 and the rest, whichever case they are written in). The page shows the title in place of the file name, the artist beside the category, and the licence and comment when you hover a sound, which is a good place to keep a CC BY credit. The tags are cleaned (control characters removed, long ones cut off) and also appear in `GET /api/layers` as `title`, `artist`, `license` and `comment`. A layer's ID is still its path, so editing a tag never changes a saved soundscape. Tags are read when a file is first seen or changes, so retagging a file in place is picked up on the next scan.
 - Hidden files and folders (names starting with `.`) and anything else are ignored. A symlink to a file counts; a symlink to a folder is not followed.
 - New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
 - `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
@@ -113,7 +114,7 @@ audio/
 └── Fan.wav                    <- in the root: no category
 ```
 
-One category per kind of sound works best, because the Add menu groups by it. Folders below the first level are only part of the layer's ID. Descriptive file names help, since the file name is what the page shows (reading titles and tags from the files is planned for v0.2). Renaming or moving a file makes it a new layer, so a soundscape that used the old path shows it as `missing`.
+One category per kind of sound works best, because the Add menu groups by it. Folders below the first level are only part of the layer's ID. The page shows each sound's title from its own tags, and falls back to the file name when it has none (see below). Renaming or moving a file makes it a new layer, so a soundscape that used the old path shows it as `missing`.
 
 ### Where to get sounds
 
@@ -187,8 +188,7 @@ The container has a health check (`voidgrid-soundscapes healthcheck`), and inval
 
 Planned, in rough order. None of it is promised.
 
-**v0.2**
-- Read titles and tags from the audio files and show them in the page, instead of only file names.
+**Next (v0.2)**
 - Timing for each layer: start a sound some time after another, or have it play once every so often (a bird call every 30 seconds) instead of looping forever.
 - Lower memory use: load a soundscape only while it is in use, instead of holding every saved one in memory.
 

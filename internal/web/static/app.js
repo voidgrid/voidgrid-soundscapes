@@ -143,7 +143,7 @@ function renderMixer(s) {
 
   // Only the sounds in this soundscape get a row, in the order they were added.
   const byId = new Map(state.layers.map((l) => [l.id, l]));
-  const sig = JSON.stringify([s.id, s.layers.map((l) => { const lib = byId.get(l.id); return [l.id, lib ? lib.name : null, lib ? lib.category : null, lib ? lib.error || '' : null]; })]);
+  const sig = JSON.stringify([s.id, s.layers.map((l) => { const lib = byId.get(l.id); return [l.id, lib ? shown(lib) : null, lib ? lib.category : null, lib ? lib.error || '' : null, lib ? detail(lib) : null]; })]);
   if (sig !== rowSignature) {
     rowSignature = sig;
     rows = new Map();
@@ -184,12 +184,17 @@ function renderSpeaker(s) {
   note.hidden = !text;
 }
 
+// What a library sound is called: the title from the file's own tags, else its file name.
+const shown = (l) => l.title || l.name;
+// The hover text: the library path, then whatever the file's tags say about who made it and on what terms.
+const detail = (l) => [l.id, l.artist && `Artist: ${l.artist}`, l.license && `Licence: ${l.license}`, l.comment].filter(Boolean).join('\n');
+
 // The Add menu lists the sounds that are in the library and not yet in this soundscape.
 function renderAdd(s, byId) {
   const used = new Set(s.layers.map((l) => l.id));
   const free = state.layers.filter((l) => !used.has(l.id) && !l.error);
   const sel = $('add');
-  const sig = JSON.stringify(free.map((l) => [l.id, l.name, l.category]));
+  const sig = JSON.stringify(free.map((l) => [l.id, shown(l), l.category, l.artist || '']));
   if (sel.dataset.sig === sig) return;
   sel.dataset.sig = sig;
   const groups = new Map();
@@ -203,7 +208,7 @@ function renderAdd(s, byId) {
   if (!free.length) hint = state.layers.length ? 'Every sound is already in this soundscape' : 'No sounds found in the audio folder';
   sel.replaceChildren(el('option', { value: '', textContent: hint }),
     ...names.map((g) => el('optgroup', { label: g },
-      ...groups.get(g).sort((a, b) => a.name.localeCompare(b.name)).map((l) => el('option', { value: l.id, textContent: l.name })))));
+      ...groups.get(g).sort((a, b) => shown(a).localeCompare(shown(b))).map((l) => el('option', { value: l.id, textContent: shown(l), title: detail(l) })))));
   sel.value = '';
   sel.disabled = !free.length;
 }
@@ -212,7 +217,7 @@ function buildRow(id, layer) {
   const root = el('div', { className: 'layer' });
   const r = { root, id, layer };
   const rm = el('button', { type: 'button', className: 'remove', textContent: '✕' });
-  rm.setAttribute('aria-label', `Remove ${layer ? layer.name : id} from this soundscape`);
+  rm.setAttribute('aria-label', `Remove ${layer ? shown(layer) : id} from this soundscape`);
   rm.title = 'Remove from this soundscape';
   rm.addEventListener('click', () => patch({ id, remove: true }));
   const note = el('span', { className: 'note', hidden: true });
@@ -229,12 +234,13 @@ function buildRow(id, layer) {
     return root;
   }
 
-  const name = el('span', { className: 'name', textContent: layer.name, title: layer.id });
-  if (layer.category) name.append(el('small', { textContent: layer.category }));
+  const name = el('span', { className: 'name', textContent: shown(layer), title: detail(layer) });
+  const sub = [layer.category, layer.artist].filter(Boolean).join(' · ');
+  if (sub) name.append(el('small', { textContent: sub }));
   const toggle = el('input', { type: 'checkbox' });
-  toggle.setAttribute('aria-label', `${layer.name} on or off`);
+  toggle.setAttribute('aria-label', `${shown(layer)} on or off`);
   const slider = el('input', { type: 'range', min: 0, max: 100, step: 1, className: 'slider' });
-  slider.setAttribute('aria-label', `${layer.name} level`);
+  slider.setAttribute('aria-label', `${shown(layer)} level`);
   const label = el('span', { className: 'pct' });
   Object.assign(r, { toggle, slider, label });
 

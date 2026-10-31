@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -74,5 +75,56 @@ func TestScanWithRealFFProbe(t *testing.T) {
 	}
 	if l, ok := lib.Get("fake.mp3"); !ok || l.Playable() {
 		t.Fatalf("fake.mp3 should be listed as unusable: %+v ok=%v", l, ok)
+	}
+}
+
+// Tags live in different places and are capitalised differently per container (ID3 on the format,
+// Vorbis comments and Opus tags on the stream), so check each against the real ffprobe.
+func TestFFProbeTags(t *testing.T) {
+	needFFmpeg(t)
+	dir := t.TempDir()
+	for _, c := range []struct{ file, codec string }{
+		{"a.mp3", "libmp3lame"}, {"a.flac", "flac"}, {"a.ogg", "libvorbis"}, {"a.opus", "libopus"},
+		{"a.m4a", "aac"}, {"a.wav", "pcm_s16le"},
+	} {
+		path := filepath.Join(dir, c.file)
+		out, err := exec.Command("ffmpeg", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+			"-c:a", c.codec, "-metadata", "title=Rain on a roof", "-metadata", "artist=A. Recordist",
+			"-metadata", "comment=Recorded at\x07 dawn", "-metadata", "copyright=CC0", path).CombinedOutput()
+		if err != nil {
+			t.Logf("cannot make %s here: %v: %s", c.file, err, out)
+			continue
+		}
+		info, err := FFProbe(context.Background(), path)
+		if err != nil {
+			t.Errorf("%s: %v", c.file, err)
+			continue
+		}
+		if info.Title != "Rain on a roof" || info.Artist != "A. Recordist" {
+			t.Errorf("%s: title %q artist %q", c.file, info.Title, info.Artist)
+		}
+		if info.License != "CC0" && c.file != "a.wav" { // WAV has no copyright field ffmpeg keeps
+			t.Errorf("%s: license %q", c.file, info.License)
+		}
+		if info.Comment != "" && info.Comment != "Recorded at dawn" {
+			t.Errorf("%s: control character not removed from comment %q", c.file, info.Comment)
+		}
+	}
+}
+
+func TestTagCleaning(t *testing.T) {
+	m := []map[string]string{{"TITLE": "  \x00 Loud \t rain  "}, {"title": "ignored"}}
+	if got := tag(120, m, "title"); got != "Loud  rain" {
+		t.Errorf("got %q", got)
+	}
+	long := strings.Repeat("é", 500)
+	if got := tag(10, []map[string]string{{"comment": long}}, "comment"); len([]rune(got)) != 11 || !strings.HasSuffix(got, "…") {
+		t.Errorf("not capped on characters: %q", got)
+	}
+	if got := tag(10, []map[string]string{{"title": "   "}}, "title"); got != "" {
+		t.Errorf("blank tag should be empty, got %q", got)
+	}
+	if got := tag(10, []map[string]string{{"author": "B"}, {"artist": "A"}}, "artist", "author"); got != "A" {
+		t.Errorf("keys should be tried in order, got %q", got)
 	}
 }

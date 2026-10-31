@@ -8,7 +8,9 @@ import (
 	"os/exec"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
+	"unicode"
 )
 
 // Info is what probing a file tells us.
@@ -17,6 +19,8 @@ type Info struct {
 	Codec      string
 	SampleRate int
 	Channels   int
+	// Tags are the file's own title, artist, licence and comment, when it has them.
+	Title, Artist, License, Comment string
 }
 
 // ProbeFunc inspects one audio file. It must fail for anything that is not a usable audio file.
@@ -31,7 +35,7 @@ func FFProbe(ctx context.Context, path string) (Info, error) {
 
 	// "--" is not needed: ffprobe takes the file as the last argument, and path is absolute.
 	out, err := exec.CommandContext(ctx, "ffprobe", "-v", "error", "-select_streams", "a:0",
-		"-show_entries", "stream=codec_name,sample_rate,channels:format=duration",
+		"-show_entries", "stream=codec_name,sample_rate,channels:stream_tags:format=duration:format_tags",
 		"-of", "json", path).Output()
 	if err != nil {
 		var ee *exec.ExitError
@@ -48,12 +52,14 @@ func FFProbe(ctx context.Context, path string) (Info, error) {
 
 type probeJSON struct {
 	Streams []struct {
-		Codec      string `json:"codec_name"`
-		SampleRate string `json:"sample_rate"`
-		Channels   int    `json:"channels"`
+		Codec      string            `json:"codec_name"`
+		SampleRate string            `json:"sample_rate"`
+		Channels   int               `json:"channels"`
+		Tags       map[string]string `json:"tags"`
 	} `json:"streams"`
 	Format struct {
-		Duration string `json:"duration"`
+		Duration string            `json:"duration"`
+		Tags     map[string]string `json:"tags"`
 	} `json:"format"`
 }
 
@@ -71,7 +77,44 @@ func parseProbe(b []byte) (Info, error) {
 		return Info{}, errors.New("unknown or zero duration")
 	}
 	rate, _ := strconv.Atoi(s.SampleRate)
-	return Info{Duration: dur, Codec: s.Codec, SampleRate: rate, Channels: s.Channels}, nil
+	info := Info{Duration: dur, Codec: s.Codec, SampleRate: rate, Channels: s.Channels}
+	// Where the tags live depends on the container (ID3 and MP4 on the format, Ogg and Opus on the stream),
+	// and their capitalisation differs (title, TITLE), so look in both and ignore case.
+	tagMaps := []map[string]string{p.Format.Tags, s.Tags}
+	info.Title = tag(120, tagMaps, "title")
+	info.Artist = tag(120, tagMaps, "artist", "author", "album_artist")
+	info.License = tag(200, tagMaps, "license", "copyright")
+	info.Comment = tag(300, tagMaps, "comment", "description")
+	return info, nil
+}
+
+// tag returns the first non-empty value among keys (compared without regard to case), looking in each
+// map in turn. Tags are text typed by whoever made the file, so it is cleaned: control characters are
+// dropped, spaces trimmed and the length capped at max characters.
+func tag(max int, maps []map[string]string, keys ...string) string {
+	for _, key := range keys {
+		for _, m := range maps {
+			for k, v := range m {
+				if !strings.EqualFold(k, key) {
+					continue
+				}
+				v = strings.TrimSpace(strings.Map(func(r rune) rune {
+					if unicode.IsControl(r) {
+						return -1
+					}
+					return r
+				}, v))
+				if v == "" {
+					continue
+				}
+				if r := []rune(v); len(r) > max {
+					v = strings.TrimSpace(string(r[:max])) + "…"
+				}
+				return v
+			}
+		}
+	}
+	return ""
 }
 
 // ffContext matches the "[mp3 @ 0x7197a57ce500] " prefix ffmpeg puts on messages: noise for a user, and
