@@ -6,7 +6,7 @@ I want to have rain, waves, or anything else I want to fall asleep to, and be ab
 
 I wrote this using Claude. The design is mine (what a soundscape is, how folders work, how Home Assistant fits in, what V1 includes and leaves out); a lot of the code is Claude's. I'm also learning Go as I go, and I'll be reading all of the code, over time, after it has been written here. Until I have, don't take my word for it that the code is good: read it before you trust it, especially if it is going anywhere near a speaker in a room where someone is asleep. It is a one person plus AI project and I would rather be upfront about that than have you find out later.
 
-It is also very early: this is a beta. The mixing, the web page and saving are tested, including against a real speaker in an earlier prototype. The Home Assistant side (the speaker control and the MQTT entities) is tested against a stub Home Assistant and a throwaway MQTT broker, **not yet against a real Home Assistant**, so expect rough edges there. Releases are tagged betas (see [Image tags](#image-tags)).
+It is also very early: this is a beta. The mixing, the web page and saving are tested, including against a real speaker in an earlier prototype. The Home Assistant side (the speaker control and the MQTT entities) is tested against a stub Home Assistant and a throwaway MQTT broker, and by hand on one real setup: the entities appear in Home Assistant, and play and stop work on a Lenovo display's speaker, both through Music Assistant and through the Dashie integration. That is one house and two speakers, so expect rough edges with other players. Releases are tagged betas (see [Image tags](#image-tags)).
 
 ## What it is
 
@@ -30,9 +30,9 @@ Not planned for V1: a Home Assistant custom card, YouTube downloads, and anythin
 The image is `ghcr.io/voidgrid/voidgrid-soundscapes` (linux/amd64):
 
 ```sh
-IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:latest         # newest stable release (none yet)
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:latest         # newest stable release
 IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:beta           # newest release of any kind, pre-releases included
-IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0-beta.1  # one exact version, never moves
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0         # one exact version, never moves
 ```
 
 While this is in beta, use `:beta` to follow along or an exact version to stay put. A beta can change in ways that need a look at the release notes; your soundscapes live in the config folder, so keep a copy of it before moving to a newer image.
@@ -98,6 +98,33 @@ Put audio files anywhere under the audio directory. Each file is a **layer**, id
 - New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
 - `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
 
+How I lay mine out (you can do it any way you like; only the first-level folder means anything to the program):
+
+```
+audio/
+├── rain/                      <- category "rain"
+│   ├── Rain - Medium - Plastic Roof.mp3       layer id: rain/Rain - Medium - Plastic Roof.mp3
+│   └── heavy/
+│       └── Downpour - Window.flac             layer id: rain/heavy/Downpour - Window.flac (still category "rain")
+├── waves/                     <- category "waves"
+│   └── Waves - Lapping - Outdoor.mp3
+├── fire/
+│   └── Fireplace - Crackle.ogg
+└── Fan.wav                    <- in the root: no category
+```
+
+One category per kind of sound works best, because the Add menu groups by it. Folders below the first level are only part of the layer's ID. Descriptive file names help, since the file name is what the page shows (reading titles and tags from the files is planned for v0.2). Renaming or moving a file makes it a new layer, so a soundscape that used the old path shows it as `missing`.
+
+### Where to get sounds
+
+No sounds are shipped with the program. Loops of a minute or more sound best, because the join comes round less often. Check the licence of each file you download, because they differ even within one site, and none of the sites below may be redistributed, so do not commit your audio folder to a public repository or bake it into an image.
+
+- **[Pixabay](https://pixabay.com/music/search/soundscapes/)**: free to use and no attribution is required. You may modify files, but you cannot sell or redistribute them on a standalone basis, meaning unchanged. See the [Pixabay content licence](https://pixabay.com/service/license-summary/).
+- **[Freesound](https://freesound.org/)**: a free account is needed to download. Each sound carries its own Creative Commons licence: CC0 (no conditions), CC BY (credit the author) or CC BY-NC (credit the author, no commercial use). Older sounds may still be under Sampling+. Keep a note of the author and licence of the CC BY ones.
+- **[BBC Sound Effects](https://sound-effects.bbcrewind.co.uk/search?cat=Nature)** (the Nature category): the BBC's [RemArc licence](https://sound-effects.bbcrewind.co.uk/licensing) allows non-commercial, personal or research use and formal education use only. You may not share the files (links are fine), use them commercially, or train or analyse with them by machine. Keep the credit `bbc.co.uk – © copyright [year] BBC` if the file does not already carry one. Fine for your own bedroom speaker, not for a product.
+
+I am not a lawyer; the terms on each site are what counts. NOTICE.md and this README do not grant any rights to third-party sounds.
+
 ### The web page
 
 Open `http://<host>:8007/`. The landing page is a card for each saved soundscape; a card opens its mixer. A mixer shows only the sounds in that soundscape, each with an on/off switch, a level slider and a ✕ to take it out of the soundscape (the file is not touched). The **Add** menu at the bottom lists the sounds that are not in it yet. Changes are applied as you make them and saved automatically; there is no Save button. **Listen** plays the stream in that browser tab (a browser buffers a second or more, so it lags your slider more than the server does). Rename, Duplicate and Delete are on the mixer, and the stream URL is there to copy. Several tabs stay in sync. It is green on black, like voidgrid-backup, and works on a phone.
@@ -156,6 +183,24 @@ The container has a health check (`voidgrid-soundscapes healthcheck`), and inval
 - **No Home Assistant entities:** the log says `connected to the MQTT broker` once it is in, and warns if the broker cannot be reached after 15 seconds; the MQTT library's own connection errors (a refused login, say) are logged too. The broker user needs read and write on `voidgrid-soundscapes/#` and `homeassistant/#`, and Home Assistant's MQTT discovery prefix must match `DISCOVERY_PREFIX`.
 - **Two entities with the same name, or an old tool's entities:** each device name gets its own entities. Give this one its own `DEVICE_NAME`.
 
+## Roadmap
+
+Planned, in rough order. None of it is promised.
+
+**v0.2**
+- Read titles and tags from the audio files and show them in the page, instead of only file names.
+- Timing for each layer: start a sound some time after another, or have it play once every so often (a bird call every 30 seconds) instead of looping forever.
+- Lower memory use: load a soundscape only while it is in use, instead of holding every saved one in memory.
+
+**Later**
+- A Home Assistant card or panel for the page.
+- The whole mix over MQTT, if there is a use for it.
+- Optional downloads from YouTube (yt-dlp).
+- Master volume and fades.
+- Noticing audio files that are deleted or replaced while a soundscape is playing.
+
+**Not planned:** login inside the app (put your own proxy in front), and watching the folder with inotify (rescanning works over network mounts).
+
 ## Development
 
 You need Go 1.22 or newer, or just Docker.
@@ -174,7 +219,7 @@ Pushing a `v*` tag builds the image, runs the smoke test and pushes it to `ghcr.
 ```sh
 IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:latest         # newest stable release
 IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:beta           # newest release of any kind, pre-releases included
-IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0-beta.1  # one exact version, never moves
+IMAGE=ghcr.io/voidgrid/voidgrid-soundscapes:v0.1.0         # one exact version, never moves
 ```
 
 A hyphen in the tag marks a pre-release: `v0.1.0-beta.1` moves only `:beta`, while `v0.1.0` moves `:latest` and `:beta`. Versioned tags never move. The image is Alpine with ffmpeg; the Go binary is static and embeds the web UI.
