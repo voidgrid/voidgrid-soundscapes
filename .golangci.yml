@@ -1,0 +1,29 @@
+version: "2"
+
+# Findings are fixed in the code. `//nolint` comments are not used (scripts/lint.sh fails if one appears
+# under cmd/ or internal/); what is excused is listed here, with the reason.
+
+linters:
+  default: standard
+  enable:
+    - gosec
+    - unconvert
+    - unparam
+  exclusions:
+    rules:
+      # gosec is excused in tests, and errcheck is not. What gosec finds there is about code that only runs
+      # under `go test`: the permissions of fixtures in temporary directories (G301, G302, G306), reading a
+      # test's own file (G304), running ffmpeg to make a fixture (G204) and unpacking PCM samples (G115).
+      - path: _test\.go
+        linters: [gosec]
+      # Running ffmpeg and ffprobe on a file is the feature. The path is never taken from a request: it comes
+      # from the library's own scan of the audio directory, and is passed as one argument, not through a shell.
+      - path: internal/(engine/(decode|encoder)|library/probe)\.go
+        linters: [gosec]
+        text: "G204"
+      # soundscapes.json holds names and levels, no secrets, and lives in a folder the operator mounts: it is
+      # left readable (0755 directory, 0644 file) so it can be looked at and backed up from the host by a user
+      # other than uid 1000. Only these two rules, only this file.
+      - path: internal/store/store\.go
+        linters: [gosec]
+        text: "G30[12]"

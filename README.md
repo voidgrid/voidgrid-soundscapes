@@ -203,12 +203,13 @@ Planned, in rough order. None of it is promised.
 
 ## Development
 
-You need Go 1.22 or newer, or just Docker.
+You need Go 1.27 or newer, or just Docker.
 
 - `go vet ./... && go test -race ./...` builds, vets and tests everything.
 - `gofmt -l cmd internal` must print nothing.
 - `docker build -t voidgrid-soundscapes:dev .` builds the image (Go 1.27 builder, Alpine runtime with ffmpeg).
 - `scripts/integration.sh <image>` runs the image against a throwaway Mosquitto broker and a stub Home Assistant API (`scripts/stubha`): discovery, commands, play and stop, restart, last will. It never touches a real broker or Home Assistant.
+- `scripts/lint.sh` runs the pinned golangci-lint in Docker; `pre-commit install` makes it (and gitleaks) run on every commit.
 - `scripts/smoke.sh <image>` boots an image the way it is meant to run (uid 1000, all capabilities dropped, read-only root) and checks it is healthy and that ffmpeg has the MP3 encoder.
 - The image build runs `gofmt`, `go vet` and `go test`, so a failing test fails the build. CI (on every push to `main` and every pull request) is just that build plus the smoke test.
 

@@ -1,0 +1,27 @@
+#!/bin/sh
+# Run golangci-lint in a container with this repo's .golangci.yml. The pre-commit
+# hook runs this on every commit that touches a Go file, so any finding blocks
+# the commit. CI and the release workflow do not run it.
+# Usage: scripts/lint.sh            (lint everything)
+#        scripts/lint.sh run ./internal/server/...
+#        scripts/lint.sh config verify
+# The linter version is pinned so a new release of it can't fail an unchanged
+# tree; bump it on purpose.
+set -eu
+cd "$(dirname "$0")/.."
+# Findings are fixed in the code, never silenced in place.
+if grep -rn --include='*.go' --exclude-dir=proto '//nolint' cmd internal; then
+  echo "lint: //nolint is not allowed; fix the finding instead" >&2
+  exit 1
+fi
+mkdir -p .cache/gopath .cache/gobuild .cache/golangci
+[ $# -gt 0 ] || set -- run
+exec docker run --rm \
+  --user "$(id -u):$(id -g)" \
+  -v "$PWD:/src:ro" -w /src \
+  -v "$PWD/.cache/gopath:/gopath" \
+  -v "$PWD/.cache/gobuild:/tmp/gobuild" \
+  -v "$PWD/.cache/golangci:/tmp/golangci" \
+  -e GOPATH=/gopath -e GOCACHE=/tmp/gobuild -e GOLANGCI_LINT_CACHE=/tmp/golangci \
+  -e GOFLAGS=-buildvcs=false -e HOME=/tmp \
+  golangci/golangci-lint:v2.15.0 golangci-lint "$@"

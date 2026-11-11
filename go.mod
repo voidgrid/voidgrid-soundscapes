@@ -1,6 +1,6 @@
 module github.com/voidgrid/voidgrid-soundscapes
 
-go 1.22
+go 1.27
 
 require github.com/eclipse/paho.mqtt.golang v1.5.0
 
