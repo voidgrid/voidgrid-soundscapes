@@ -34,6 +34,10 @@ const (
 	// settleTime is how long a file must have gone unmodified before it is probed, so a file that is still
 	// being copied or downloaded is not read half-written.
 	settleTime = 2 * time.Second
+	// futureSlack is how far ahead of this machine's clock a file's time may be and still count as "just
+	// written" (a file server whose clock runs a little fast). A file dated further ahead than that was not
+	// written just now; it is taken as it is instead of being ignored until its date arrives.
+	futureSlack = time.Minute
 	// probeWorkers bounds how many ffprobe processes run at once.
 	probeWorkers = 4
 )
@@ -240,7 +244,7 @@ func (lib *Library) walk(prev map[string]Layer) (files []found, kept map[string]
 			return nil
 		}
 		id := filepath.ToSlash(rel)
-		if time.Since(fi.ModTime()) < lib.settle {
+		if age := time.Since(fi.ModTime()); age < lib.settle && age > -futureSlack {
 			if p, ok := prev[id]; ok {
 				kept[id] = p
 			}

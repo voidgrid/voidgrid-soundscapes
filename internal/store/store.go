@@ -328,7 +328,7 @@ func writeAtomic(path string, data []byte) error {
 		return err
 	}
 	ok = true
-	if d, err := os.Open(dir); err == nil { // make the rename itself durable; best effort
+	if d, err := os.Open(filepath.Clean(dir)); err == nil { // make the rename itself durable; best effort
 		_ = d.Sync()
 		_ = d.Close()
 	}

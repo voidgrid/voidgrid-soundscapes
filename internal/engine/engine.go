@@ -88,6 +88,21 @@ func (e *Engine) Apply(id string, spec Spec) (Status, error) {
 	return m.Apply(spec), nil
 }
 
+// Refresh applies every soundscape's current mix again. Call it after the library has changed: a layer whose
+// file has appeared starts playing, one whose file was replaced is loaded again, and one whose file is gone
+// fades out and reports that it is missing. Layers whose files did not change are left alone.
+func (e *Engine) Refresh() {
+	e.mu.Lock()
+	ms := make([]*Mix, 0, len(e.mixes))
+	for _, m := range e.mixes {
+		ms = append(ms, m)
+	}
+	e.mu.Unlock()
+	for _, m := range ms {
+		m.refresh()
+	}
+}
+
 // Remove deletes a soundscape: its listeners are cut off, its stream stops and its layers are released.
 // It reports whether the soundscape existed.
 func (e *Engine) Remove(id string) bool {

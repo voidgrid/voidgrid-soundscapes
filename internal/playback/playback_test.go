@@ -357,7 +357,7 @@ func TestHomeAssistantErrorsAreReportedAndClear(t *testing.T) {
 	s, st, h := setup(t)
 	ctx := context.Background()
 	st.set = store.Settings{Soundscape: "night", Player: "media_player.bedroom"}
-	h.stateErr = errors.New("Home Assistant answered 500")
+	h.stateErr = errors.New("error 500 from Home Assistant")
 	if err := s.refresh(ctx, false); err == nil {
 		t.Fatal("expected an error")
 	}
@@ -369,7 +369,7 @@ func TestHomeAssistantErrorsAreReportedAndClear(t *testing.T) {
 	if got := s.State(); got.HAError != "" {
 		t.Fatalf("the error did not clear: %+v", got)
 	}
-	h.playErr = errors.New("Home Assistant answered 400: no such entity")
+	h.playErr = errors.New("error 400 from Home Assistant: no such entity")
 	if err := s.Play(ctx, "night", "media_player.bedroom"); err == nil || !strings.Contains(err.Error(), "400") {
 		t.Fatalf("Play = %v", err)
 	}

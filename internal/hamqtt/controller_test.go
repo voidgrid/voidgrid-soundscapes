@@ -276,7 +276,7 @@ func TestBadCommandsDoNothing(t *testing.T) {
 
 func TestFailedCommandKeepsRunning(t *testing.T) {
 	_, conn, pb, _ := fixture(t)
-	pb.err = errors.New("Home Assistant answered 500")
+	pb.err = errors.New("error 500 from Home Assistant")
 	conn.send("voidgrid-soundscapes/sleep_sounds/playing/set", "ON")
 	waitFor(t, func() bool { return strings.Contains(pb.log(), "play") })
 	pb.err = nil

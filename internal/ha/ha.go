@@ -82,14 +82,14 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 	if err != nil {
 		return nil, scrub(err, c.token)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, err := io.ReadAll(io.LimitReader(resp.Body, maxStates))
 	if err != nil {
 		return nil, scrub(err, c.token)
 	}
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
-		return nil, errors.New("Home Assistant refused the token (401)")
+		return nil, errors.New("the token was refused by Home Assistant (401)")
 	case resp.StatusCode == http.StatusNotFound:
 		return nil, fmt.Errorf("not found in Home Assistant (404): %s", path)
 	case resp.StatusCode < 200 || resp.StatusCode > 299:
@@ -97,7 +97,7 @@ func (c *Client) do(ctx context.Context, method, path string, body any) ([]byte,
 		if len(msg) > maxError {
 			msg = msg[:maxError] + "…"
 		}
-		return nil, fmt.Errorf("Home Assistant answered %d: %s", resp.StatusCode, msg)
+		return nil, fmt.Errorf("error %d from Home Assistant: %s", resp.StatusCode, msg)
 	}
 	return b, nil
 }

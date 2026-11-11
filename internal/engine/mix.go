@@ -93,6 +93,7 @@ type Mix struct {
 	problems  map[string]layerState
 	listeners map[*Listener]struct{}
 	running   bool
+	closed    bool // removed for good; a late refresh must not load its layers again
 	runID     int
 	cancel    context.CancelFunc
 	grace     *time.Timer
@@ -108,7 +109,20 @@ func newMix(id string, e *Engine) *Mix {
 func (m *Mix) Apply(spec Spec) Status {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	return m.applyLocked(spec)
+}
 
+// refresh applies the current mix again, to pick up files that appeared, changed or went away.
+func (m *Mix) refresh() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.closed {
+		return
+	}
+	m.applyLocked(Spec{Layers: m.layers})
+}
+
+func (m *Mix) applyLocked(spec Spec) Status {
 	cleaned := make([]LayerSpec, 0, len(spec.Layers))
 	want := map[string]bool{}
 	for _, ls := range spec.Layers {
@@ -168,6 +182,11 @@ func (m *Mix) Apply(spec Spec) Status {
 		m.held[ls.ID] = held{h: h, key: k}
 		go m.await(ls.ID, h)
 	}
+	if !m.running {
+		// Nobody is listening, so nothing is rendered and there is no fade to wait for: give back the audio of
+		// layers that were switched off or removed now, not when the next listener connects.
+		m.mixer.Settle()
+	}
 	return m.statusLocked()
 }
 
@@ -202,6 +221,7 @@ func (m *Mix) releaseLocked(id string) {
 func (m *Mix) close() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.closed = true
 	for id := range m.held {
 		m.releaseLocked(id)
 	}
@@ -275,7 +295,13 @@ func (m *Mix) remove(l *Listener) {
 			m.mu.Lock()
 			defer m.mu.Unlock()
 			if len(m.listeners) == 0 && m.running {
+				// Marked stopped here, not when the encoder has exited: a listener that connects while it is
+				// exiting then starts a new run instead of joining the one that is about to cut it off.
 				m.cancel()
+				m.cancel = nil
+				m.running = false
+				m.mixer.Settle()
+				m.e.log.Info("stream stopped", "soundscape", m.id)
 			}
 			m.grace = nil
 		})
@@ -310,7 +336,7 @@ func (m *Mix) run(ctx context.Context, id int) {
 		for {
 			n, rerr := enc.Out.Read(buf)
 			for _, f := range fs.Write(buf[:n]) {
-				m.broadcast(f)
+				m.broadcast(id, f)
 			}
 			if rerr != nil {
 				return
@@ -325,7 +351,7 @@ func (m *Mix) run(ctx context.Context, id int) {
 	for ctx.Err() == nil {
 		m.mixer.Render(pcm)
 		for i, s := range pcm {
-			raw[2*i], raw[2*i+1] = byte(s), byte(s>>8)
+			raw[2*i], raw[2*i+1] = byte(s&0xff), byte((s>>8)&0xff)
 		}
 		if _, werr := enc.In.Write(raw); werr != nil {
 			break
@@ -358,8 +384,8 @@ func (m *Mix) run(ctx context.Context, id int) {
 func (m *Mix) finish(id int, err error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.runID != id {
-		return
+	if m.runID != id || !m.running {
+		return // a newer run has taken over, or this one was already marked stopped when its grace ran out
 	}
 	m.running = false
 	if m.cancel != nil {
@@ -373,12 +399,18 @@ func (m *Mix) finish(id int, err error) {
 		l.fail(err)
 	}
 	m.listeners = map[*Listener]struct{}{}
+	m.mixer.Settle()
 	m.e.log.Info("stream stopped", "soundscape", m.id)
 }
 
-func (m *Mix) broadcast(frame []byte) {
+// broadcast hands a frame of run id to the listeners. Frames from a run that has been stopped or replaced
+// are dropped, so the last output of an encoder that is exiting never lands in a newer run's stream.
+func (m *Mix) broadcast(id int, frame []byte) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.runID != id || !m.running {
+		return
+	}
 	for l := range m.listeners {
 		select {
 		case l.C <- frame:

@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 )
 
 type player struct {
@@ -87,5 +88,6 @@ func main() {
 		_, _ = w.Write([]byte(strings.Join(calls, "\n") + "\n"))
 	})
 	log.Printf("stub Home Assistant on %s", *addr)
-	log.Fatal(http.ListenAndServe(*addr, mux))
+	srv := &http.Server{Addr: *addr, Handler: mux, ReadHeaderTimeout: 10 * time.Second}
+	log.Fatal(srv.ListenAndServe())
 }

@@ -337,3 +337,25 @@ func TestFirstLineStripsFFmpegContext(t *testing.T) {
 		}
 	}
 }
+
+// A file dated in the future (copied from a machine with a wrong clock) is not "still being written".
+func TestFileDatedInTheFutureIsListed(t *testing.T) {
+	lib, root, _ := newLib(t)
+	p := write(t, root, "later.mp3", "x")
+	future := time.Now().Add(24 * time.Hour)
+	if err := os.Chtimes(p, future, future); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := lib.Scan(context.Background()); !reflect.DeepEqual(d.Added, []string{"later.mp3"}) {
+		t.Fatalf("a file dated tomorrow should appear: %+v", d)
+	}
+	// A few seconds ahead is a file server with a fast clock, and the file may still be being written.
+	q := write(t, root, "skewed.mp3", "x")
+	soon := time.Now().Add(5 * time.Second)
+	if err := os.Chtimes(q, soon, soon); err != nil {
+		t.Fatal(err)
+	}
+	if d, _ := lib.Scan(context.Background()); !d.Empty() {
+		t.Fatalf("a file dated a few seconds ahead must wait: %+v", d)
+	}
+}

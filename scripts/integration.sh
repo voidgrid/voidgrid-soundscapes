@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # End-to-end test of the Home Assistant side, on throwaway services: a private Mosquitto broker and a stub
 # Home Assistant REST API (scripts/stubha) on this host. It never touches the real broker or Home Assistant.
-# Needs docker, curl and go; the eclipse-mosquitto:2 image must be available. Usage: scripts/integration.sh <image>
+# Needs docker and curl; the eclipse-mosquitto:2 and golang:1.27 images must be available (the stub is built
+# in golang:1.27, the same Go as the image, so the host needs no Go at all). Usage: scripts/integration.sh <image>
 set -euo pipefail
 image=${1:?usage: scripts/integration.sh <image>}
 here=$(cd "$(dirname "$0")/.." && pwd)
@@ -40,7 +41,9 @@ base=voidgrid-soundscapes/integration_test
 # 1. throwaway services
 printf 'listener 1883\nallow_anonymous true\n' >"$tmp/mosquitto.conf"
 docker run -d --name "$mqtt" -p 127.0.0.1:$mport:1883 -v "$tmp/mosquitto.conf:/mosquitto/config/mosquitto.conf:ro" eclipse-mosquitto:2 >/dev/null
-(cd "$here" && go build -o "$tmp/stubha" ./scripts/stubha)
+docker run --rm --user "$(id -u):$(id -g)" -v "$here:/src:ro" -v "$tmp:/out" -w /src \
+  -e HOME=/tmp -e GOCACHE=/tmp/gocache -e GOPATH=/tmp/gopath -e GOFLAGS=-buildvcs=false -e CGO_ENABLED=0 \
+  golang:1.27 go build -o /out/stubha ./scripts/stubha
 "$tmp/stubha" -listen 127.0.0.1:$hport >"$tmp/stubha.log" 2>&1 &
 stubpid=$!
 mkdir "$tmp/audio" "$tmp/config" && chmod 777 "$tmp/audio" "$tmp/config"

@@ -79,7 +79,7 @@ func TestChangesAreWrittenAfterTheDelayAndCoalesced(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, FileName)
 	s := open(t, dir, 80*time.Millisecond)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 
 	s.Put(sample("a"))
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -125,7 +125,7 @@ func TestWritesLeaveNoTempFilesAndTheFileIsReadable(t *testing.T) {
 
 func TestConcurrentUseIsSafe(t *testing.T) {
 	s := open(t, t.TempDir(), time.Millisecond)
-	defer s.Close()
+	defer func() { _ = s.Close() }()
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {
 		wg.Add(1)
@@ -197,7 +197,7 @@ func TestUnwritableDirectoryFailsAtOpen(t *testing.T) {
 	if err := os.Chmod(dir, 0o555); err != nil {
 		t.Fatal(err)
 	}
-	defer os.Chmod(dir, 0o755)
+	defer func() { _ = os.Chmod(dir, 0o755) }() // so the temporary directory can be removed
 	if _, err := Open(dir, time.Hour, testLog); err == nil || !strings.Contains(err.Error(), "not writable") {
 		t.Fatalf("Open = %v, want a 'not writable' error", err)
 	}

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -114,7 +115,40 @@ func New(lib Layers, mixes Mixes, st Store, play Player) http.Handler {
 	mux.HandleFunc("GET /api/events", s.events)
 	mux.Handle("GET /", web.Handler())
 	mux.HandleFunc("GET /stream/{id}", s.stream)
-	return mux
+	return sameSite(mux)
+}
+
+// sameSite refuses requests that change something (POST, PUT, PATCH, DELETE) when a browser says they come
+// from another website. The page has no login, so without this any website open in a browser on the LAN could
+// start a speaker or create soundscapes behind the user's back. Reading (GET) is not restricted, and neither
+// is anything that is not a browser (Home Assistant, curl, a script): those send no Origin header.
+//
+// The check is the standard library's: the browser's Sec-Fetch-Site header, or, where the browser does not
+// send it (plain HTTP on a LAN address), the Origin header compared with the Host. A reverse proxy that
+// changes Host would fail that comparison, so the host it was asked for (X-Forwarded-Host) is accepted too.
+// Another website cannot forge that header: adding it makes the browser ask permission first, which is
+// never given.
+func sameSite(next http.Handler) http.Handler {
+	check := http.NewCrossOriginProtection()
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := check.Check(r); err != nil && !forwardedSameHost(r) {
+			writeError(w, http.StatusForbidden, "refused: this request comes from another website (open this page at its own address; behind a reverse proxy, pass the Host or X-Forwarded-Host header on)")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// forwardedSameHost reports whether the page that sent r was served from the host a reverse proxy says it
+// was asked for. It never overrules a browser that says the request is cross-site.
+func forwardedSameHost(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") != "" {
+		return false
+	}
+	asked, _, _ := strings.Cut(r.Header.Get("X-Forwarded-Host"), ",")
+	asked = strings.TrimSpace(asked)
+	origin, err := url.Parse(r.Header.Get("Origin"))
+	return err == nil && asked != "" && strings.EqualFold(origin.Host, asked)
 }
 
 func (s *server) health(w http.ResponseWriter, r *http.Request) {

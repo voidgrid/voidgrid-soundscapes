@@ -60,7 +60,7 @@ func (f *fakeEncoder) factory(ctx context.Context) (*Encoder, error) {
 	failAfter := f.failAfter
 	go func() {
 		defer close(done)
-		defer outW.Close()
+		defer func() { _ = outW.Close() }()
 		defer f.stops.Add(1)
 		raw := make([]byte, ChunkSamples*2)
 		for n := 1; ; n++ {
@@ -613,4 +613,153 @@ func TestEngineConcurrentUse(t *testing.T) {
 		}(g)
 	}
 	wg.Wait()
+}
+
+func (f *fakeLib) remove(id string) { f.mu.Lock(); delete(f.m, id); f.mu.Unlock() }
+
+// mixLayerState returns the state of the one layer of the soundscape "mix".
+func mixLayerState(t *testing.T, e *Engine) string {
+	const id = "mix"
+	t.Helper()
+	st, ok := e.Status(id)
+	if !ok || len(st.Layers) != 1 {
+		t.Fatalf("status of %s = %+v, %v", id, st, ok)
+	}
+	return st.Layers[0].State
+}
+
+// A soundscape applied before the library has been scanned (every start of the program) must begin to play
+// once the scan has found its files.
+func TestRefreshLoadsLayersThatAppearedInTheLibrary(t *testing.T) {
+	fx := newFixture(t) // an empty library, as at start-up
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	if got := mixLayerState(t, fx.e); got != StateMissing {
+		t.Fatalf("before the scan: state %q, want missing", got)
+	}
+	fx.lib.set(layer("rain.mp3"))
+	fx.e.Refresh()
+	eventually(t, "the layer to load", func() bool { return mixLayerState(t, fx.e) == StateReady })
+	l, _ := fx.e.Subscribe("mix")
+	defer l.Close()
+	meanNear(t, fx.enc, 10000, 2)
+}
+
+func TestRefreshFollowsFilesReplacedAndDeletedWhilePlaying(t *testing.T) {
+	fx := newFixture(t, "rain.mp3")
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	l, _ := fx.e.Subscribe("mix")
+	defer l.Close()
+	meanNear(t, fx.enc, 10000, 2)
+
+	fx.values["rain.mp3"] = 3000 // replaced by another recording
+	changed := layer("rain.mp3")
+	changed.ModTime = changed.ModTime.Add(time.Minute)
+	fx.lib.set(changed)
+	fx.e.Refresh()
+	meanNear(t, fx.enc, 3000, 2)
+
+	fx.lib.remove("rain.mp3")
+	fx.e.Refresh()
+	meanNear(t, fx.enc, 0, 2)
+	if got := mixLayerState(t, fx.e); got != StateMissing {
+		t.Fatalf("after the file was deleted: state %q, want missing", got)
+	}
+	if st, _ := fx.e.Status("mix"); !st.Layers[0].Enabled || st.Layers[0].Level != 1 {
+		t.Fatalf("the layer's settings must survive its file going away: %+v", st.Layers[0])
+	}
+
+	fx.lib.set(changed) // and it comes back
+	fx.e.Refresh()
+	meanNear(t, fx.enc, 3000, 2)
+}
+
+func TestRefreshDoesNotDecodeUnchangedLayersAgain(t *testing.T) {
+	fx := newFixture(t, "rain.mp3")
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	eventually(t, "the layer to load", func() bool { return mixLayerState(t, fx.e) == StateReady })
+	fx.e.Refresh()
+	fx.e.Refresh()
+	if n := fx.calls.Load(); n != 1 {
+		t.Fatalf("decoded %d times, want 1", n)
+	}
+}
+
+// With nobody listening nothing is rendered, so the fade that normally frees a layer never runs.
+func TestLayerSwitchedOffOrRemovedWhileNobodyListensGivesItsMemoryBack(t *testing.T) {
+	fx := newFixture(t, "rain.mp3")
+	on := LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true}
+	apply(t, fx.e, "mix", on)
+	m := fx.e.mixes["mix"]
+	eventually(t, "the layer to load", func() bool { return m.mixer.Loaded("rain.mp3") })
+
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: false})
+	if m.mixer.Loaded("rain.mp3") {
+		t.Fatal("a layer switched off while nobody listens still holds its audio")
+	}
+	apply(t, fx.e, "mix", on)
+	eventually(t, "the layer to load again", func() bool { return m.mixer.Loaded("rain.mp3") })
+	apply(t, fx.e, "mix")
+	if ids := m.mixer.IDs(); len(ids) != 0 {
+		t.Fatalf("a layer removed while nobody listens is still in the mixer: %v", ids)
+	}
+
+	// and it still plays when switched on and listened to
+	apply(t, fx.e, "mix", on)
+	l, _ := fx.e.Subscribe("mix")
+	defer l.Close()
+	meanNear(t, fx.enc, 10000, 2)
+}
+
+// The encoder is stopped a few seconds after the last listener leaves. A player that connects while it is
+// still exiting must get a stream, not be cut off with it.
+func TestListenerThatConnectsWhileTheEncoderIsStoppingGetsANewOne(t *testing.T) {
+	fx := newFixture(t, "rain.mp3")
+	release := make(chan struct{})
+	var once sync.Once
+	free := func() { once.Do(func() { close(release) }) }
+	defer free()
+	fx.e.newEncoder = func(ctx context.Context) (*Encoder, error) {
+		enc, err := fx.enc.factory(ctx)
+		if err != nil {
+			return nil, err
+		}
+		first := fx.enc.starts.Load() == 1
+		wait := enc.wait
+		enc.wait = func() error {
+			err := wait()
+			if first {
+				<-release // the first encoder takes its time to exit
+			}
+			return err
+		}
+		return enc, nil
+	}
+	apply(t, fx.e, "mix", LayerSpec{ID: "rain.mp3", Level: 1, Enabled: true})
+	l1, _ := fx.e.Subscribe("mix")
+	<-l1.C
+	l1.Close()
+	eventually(t, "the idle stream to be stopped", func() bool { st, _ := fx.e.Status("mix"); return !st.Streaming })
+
+	l2, _ := fx.e.Subscribe("mix") // the first encoder has not exited yet
+	defer l2.Close()
+	select {
+	case <-l2.C:
+	case <-l2.Done():
+		t.Fatalf("the new listener was cut off: %v", l2.Err())
+	case <-time.After(5 * time.Second):
+		t.Fatal("the new listener got no audio")
+	}
+	free() // now the first encoder exits; that must not touch the new stream
+	time.Sleep(100 * time.Millisecond)
+	select {
+	case <-l2.Done():
+		t.Fatalf("the new listener was cut off when the old encoder exited: %v", l2.Err())
+	default:
+	}
+	if st, _ := fx.e.Status("mix"); !st.Streaming || st.Listeners != 1 {
+		t.Fatalf("status = %+v, want streaming with one listener", st)
+	}
+	if n := fx.enc.starts.Load(); n != 2 {
+		t.Fatalf("encoder started %d times, want 2", n)
+	}
 }

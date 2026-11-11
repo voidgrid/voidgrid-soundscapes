@@ -54,7 +54,7 @@ func fakeEncoder(ctx context.Context) (*engine.Encoder, error) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		defer outW.Close()
+		defer func() { _ = outW.Close() }()
 		buf := make([]byte, engine.ChunkSamples*2)
 		for n := byte(0); ; n++ {
 			if _, err := io.ReadFull(inR, buf); err != nil {
@@ -152,7 +152,7 @@ func do(t *testing.T, method, url, body string) (*http.Response, []byte) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	b, _ := io.ReadAll(resp.Body)
 	return resp, b
 }
@@ -291,7 +291,7 @@ func TestStreamDeliversWholeMP3FramesAndReleasesTheListener(t *testing.T) {
 		t.Fatalf("status while streaming: %+v", st)
 	}
 
-	resp.Body.Close() // the player goes away
+	_ = resp.Body.Close() // the player goes away
 	deadline := time.Now().Add(3 * time.Second)
 	for {
 		_, body = do(t, "GET", ts.URL+"/api/soundscapes/night", "")
@@ -313,7 +313,7 @@ func TestStreamEndsWhenTheEngineStops(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.ReadFull(resp.Body, make([]byte, 417*2)); err != nil {
 		t.Fatal(err)
 	}
@@ -419,7 +419,7 @@ func TestDeleteDisconnectsListenersAndForgetsTheSoundscape(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if _, err := io.ReadFull(resp.Body, make([]byte, 417*2)); err != nil {
 		t.Fatal(err)
 	}
@@ -557,7 +557,7 @@ func TestEventsSendTheStateAtOnceAndAgainOnEveryChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.Header.Get("Content-Type") != "text/event-stream" {
 		t.Fatalf("content type %q", resp.Header.Get("Content-Type"))
 	}
@@ -582,7 +582,7 @@ func TestEventsSendTheStateAtOnceAndAgainOnEveryChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer stream.Body.Close()
+	defer func() { _ = stream.Body.Close() }()
 	if got := readEvent(t, r); !strings.Contains(got, `"listeners":1`) {
 		t.Fatalf("event after a listener joined: %s", got)
 	}
@@ -594,7 +594,7 @@ func TestEventStreamEndsWhenTheServerShutsDown(t *testing.T) {
 	lib := fakeLib{layerOf("rain.mp3")}
 	eng := engine.New(ctx, lib, engine.Options{}, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
 	st, _ := store.Open(t.TempDir(), 0, slog.New(slog.NewTextHandler(nopWriter{}, nil)))
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	pb, _ := playback.New(st, nil, playback.Options{})
 	srv.Config.Handler = New(lib, eng, st, pb)
 	srv.Config.BaseContext = func(net.Listener) context.Context { return ctx }
@@ -605,7 +605,7 @@ func TestEventStreamEndsWhenTheServerShutsDown(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	readEvent(t, bufio.NewReader(resp.Body))
 	stop()
 	done := make(chan struct{})
@@ -708,7 +708,7 @@ func TestEventsCarryThePlayerState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if first := readEvent(t, bufio.NewReader(resp.Body)); !strings.Contains(first, `"player":{"haConfigured":false`) {
 		t.Fatalf("first event: %s", first)
 	}
@@ -739,5 +739,50 @@ func TestStopRefusesAForeignStreamUnlessForced(t *testing.T) {
 	}
 	if resp, _ := do(t, "POST", ts.URL+"/api/player/stop", `{"forse":true}`); resp.StatusCode != 400 {
 		t.Errorf("a misspelt field was accepted: %d", resp.StatusCode)
+	}
+}
+
+func TestChangesFromAnotherWebsiteAreRefused(t *testing.T) {
+	ts, _ := newTestServer(t)
+	own := strings.TrimPrefix(ts.URL, "http://")
+	send := func(method, path, body string, headers ...string) int {
+		t.Helper()
+		req, err := http.NewRequest(method, ts.URL+path, strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i+1 < len(headers); i += 2 {
+			req.Header.Set(headers[i], headers[i+1])
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = resp.Body.Close()
+		return resp.StatusCode
+	}
+	create := `{"name":"x"}`
+	for _, c := range []struct {
+		what    string
+		method  string
+		path    string
+		body    string
+		headers []string
+		want    int
+	}{
+		{"no browser (Home Assistant, curl)", "POST", "/api/soundscapes", create, nil, 201},
+		{"the page itself over plain HTTP", "POST", "/api/soundscapes", create, []string{"Origin", "http://" + own}, 201},
+		{"the page itself, browser says same-origin", "POST", "/api/soundscapes", create, []string{"Origin", "https://sounds.example", "Sec-Fetch-Site", "same-origin"}, 201},
+		{"the page behind a proxy that changes Host", "POST", "/api/soundscapes", create, []string{"Origin", "http://sounds.lan", "X-Forwarded-Host", "sounds.lan"}, 201},
+		{"another website, a form-style post", "POST", "/api/soundscapes", create, []string{"Origin", "https://evil.example", "Content-Type", "text/plain"}, 403},
+		{"another website, browser says cross-site", "POST", "/api/player/play", `{}`, []string{"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"}, 403},
+		{"another website naming a forwarded host", "POST", "/api/soundscapes", create, []string{"Origin", "https://evil.example", "X-Forwarded-Host", "sounds.lan"}, 403},
+		{"cross-site overrules a forwarded host", "POST", "/api/soundscapes", create, []string{"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site", "X-Forwarded-Host", "evil.example"}, 403},
+		{"another website deleting", "DELETE", "/api/soundscapes/x", "", []string{"Origin", "https://evil.example"}, 403},
+		{"reading from anywhere", "GET", "/api/soundscapes", "", []string{"Origin", "https://evil.example", "Sec-Fetch-Site", "cross-site"}, 200},
+	} {
+		if got := send(c.method, c.path, c.body, c.headers...); got != c.want {
+			t.Errorf("%s: status %d, want %d", c.what, got, c.want)
+		}
 	}
 }

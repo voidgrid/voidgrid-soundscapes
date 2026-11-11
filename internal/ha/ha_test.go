@@ -91,7 +91,7 @@ func TestPlayAndStopSendTheRightServiceCalls(t *testing.T) {
 }
 
 func TestErrorsAreClearAndNeverContainTheToken(t *testing.T) {
-	for code, want := range map[int]string{401: "refused the token", 404: "not found", 500: "answered 500"} {
+	for code, want := range map[int]string{401: "token was refused", 404: "not found", 500: "error 500"} {
 		c, _ := stub(t, func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(code)
 			_, _ = w.Write([]byte("oops " + token + " " + strings.Repeat("x", 500)))

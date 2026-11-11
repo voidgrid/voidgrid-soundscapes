@@ -49,6 +49,20 @@ func main() {
 	}
 
 	lib := library.New(cfg.AudioDir, nil, log)
+	eng := engine.New(ctx, lib, engine.Options{
+		Loop: engine.LoopOptions{Crossfade: cfg.LoopCrossfade, SilenceThreshold: engine.DefaultLoopOptions.SilenceThreshold},
+	}, log)
+
+	// The library is still empty here, so every layer starts out missing. The first scan below, and every
+	// later one that finds a change, refreshes the soundscapes, which loads the layers whose files are there.
+	saved := soundscapes.List()
+	for _, sc := range saved {
+		if _, err := eng.Apply(sc.ID, engine.Spec{Layers: sc.Layers}); err != nil {
+			log.Error("cannot start a saved soundscape", "soundscape", sc.ID, "err", err)
+		}
+	}
+	log.Info("soundscapes loaded", "count", len(saved))
+
 	go lib.Run(ctx, cfg.ScanInterval, func(d library.Diff) {
 		layers := lib.Layers()
 		bad := 0
@@ -58,19 +72,8 @@ func main() {
 			}
 		}
 		log.Info("library changed", "added", len(d.Added), "removed", len(d.Removed), "changed", len(d.Changed), "total", len(layers), "unusable", bad)
+		eng.Refresh()
 	})
-
-	eng := engine.New(ctx, lib, engine.Options{
-		Loop: engine.LoopOptions{Crossfade: cfg.LoopCrossfade, SilenceThreshold: engine.DefaultLoopOptions.SilenceThreshold},
-	}, log)
-
-	saved := soundscapes.List()
-	for _, sc := range saved {
-		if _, err := eng.Apply(sc.ID, engine.Spec{Layers: sc.Layers}); err != nil {
-			log.Error("cannot start a saved soundscape", "soundscape", sc.ID, "err", err)
-		}
-	}
-	log.Info("soundscapes loaded", "count", len(saved))
 
 	// Home Assistant: talking to it is optional, and so are the MQTT entities.
 	var haClient playback.HA

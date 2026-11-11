@@ -267,7 +267,7 @@ func (s *Service) Play(ctx context.Context, soundscape, player string) error {
 // playLocked records the choices and sends the command. Callers hold opMu.
 func (s *Service) playLocked(ctx context.Context, soundscape, player string) error {
 	if s.ha == nil {
-		return errors.New("Home Assistant is not configured (set VOIDGRID_SOUNDSCAPES_HA_URL and VOIDGRID_SOUNDSCAPES_HA_TOKEN)")
+		return errors.New("the connection to Home Assistant is not configured (set VOIDGRID_SOUNDSCAPES_HA_URL and VOIDGRID_SOUNDSCAPES_HA_TOKEN)")
 	}
 	u := s.streamURL(soundscape)
 	if u == "" {
@@ -291,7 +291,7 @@ func (s *Service) Stop(ctx context.Context) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.ha == nil {
-		return errors.New("Home Assistant is not configured")
+		return errors.New("the connection to Home Assistant is not configured")
 	}
 	if err := s.refresh(ctx, false); err != nil { // read the player now rather than trust a poll that may be seconds old
 		return err
@@ -312,7 +312,7 @@ func (s *Service) ForceStop(ctx context.Context) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
 	if s.ha == nil {
-		return errors.New("Home Assistant is not configured")
+		return errors.New("the connection to Home Assistant is not configured")
 	}
 	player := s.sc.Settings().Player
 	if player == "" {

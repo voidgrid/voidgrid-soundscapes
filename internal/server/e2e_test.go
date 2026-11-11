@@ -111,7 +111,7 @@ func TestRealStreamLiveMixing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 	pb, _ := playback.New(st, nil, playback.Options{})
 	ts := httptest.NewServer(New(lib, eng, st, pb))
 	defer ts.Close()
@@ -149,7 +149,7 @@ func TestRealStreamLiveMixing(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	var cap capture
 	go cap.run(resp.Body)
 
@@ -163,7 +163,7 @@ func TestRealStreamLiveMixing(t *testing.T) {
 	if _, err := io.ReadFull(late.Body, lateHead); err != nil {
 		t.Fatal(err)
 	}
-	late.Body.Close()
+	_ = late.Body.Close()
 	if lateHead[0] != 0xFF || lateHead[1]&0xE0 != 0xE0 {
 		t.Fatalf("a late joiner got % x, not the start of an MP3 frame", lateHead)
 	}
@@ -171,7 +171,7 @@ func TestRealStreamLiveMixing(t *testing.T) {
 	switchedAt := put(tone{1, false}, tone{1, true})
 	time.Sleep(3 * time.Second)
 	data, first := cap.bytes()
-	resp.Body.Close()
+	_ = resp.Body.Close()
 
 	if len(data) < 4 || data[0] != 0xFF || data[1]&0xE0 != 0xE0 {
 		t.Fatalf("the stream does not start with an MP3 frame header: % x", data[:min(8, len(data))])

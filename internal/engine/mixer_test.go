@@ -108,8 +108,8 @@ func TestSoftLimiter(t *testing.T) {
 	var prev int16 = -1
 	for x := float32(0); x < 200000; x += 37 {
 		v := softClip(x)
-		if v > math.MaxInt16 || v < prev {
-			t.Fatalf("limiter not monotonic or exceeds full scale at %.0f: %d (prev %d)", x, v, prev)
+		if v < prev {
+			t.Fatalf("limiter not monotonic at %.0f: %d (prev %d)", x, v, prev)
 		}
 		if softClip(-x) != -v && !(x == 0) {
 			t.Fatalf("limiter not symmetric at %.0f", x)
@@ -125,7 +125,7 @@ func TestSoftLimiter(t *testing.T) {
 	m.SetLoop("a", dc(10, 30000))
 	m.SetLoop("b", dc(10, 30000))
 	out := render(m, 8192)
-	if last := out[len(out)-1]; last <= 29490 || last > math.MaxInt16 {
+	if last := out[len(out)-1]; last <= 29490 {
 		t.Fatalf("two loud layers should be eased below full scale, got %d", last)
 	}
 }

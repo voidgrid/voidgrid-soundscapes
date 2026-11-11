@@ -55,7 +55,7 @@ func FFmpegDecode(ctx context.Context, path string, seconds float64) ([]int16, e
 		n += held
 		pairs := n / 2
 		for i := 0; i < pairs; i++ {
-			pcm = append(pcm, int16(uint16(buf[2*i])|uint16(buf[2*i+1])<<8))
+			pcm = append(pcm, int16(buf[2*i])|int16(buf[2*i+1])<<8) // little-endian; the high byte carries the sign
 		}
 		held = n - 2*pairs
 		if held == 1 {

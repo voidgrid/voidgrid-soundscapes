@@ -97,6 +97,7 @@ Put audio files anywhere under the audio directory. Each file is a **layer**, id
 - **Tags:** the title, artist, licence (`license` or `copyright`) and comment tags are read from the file with `ffprobe` (ID3, Vorbis/Opus comments, MP4 and the rest, whichever case they are written in). The page shows the title in place of the file name, the artist beside the category, and the licence and comment when you hover a sound, which is a good place to keep a CC BY credit. The tags are cleaned (control characters removed, long ones cut off) and also appear in `GET /api/layers` as `title`, `artist`, `license` and `comment`. A layer's ID is still its path, so editing a tag never changes a saved soundscape. Tags are read when a file is first seen or changes, so retagging a file in place is picked up on the next scan.
 - Hidden files and folders (names starting with `.`) and anything else are ignored. A symlink to a file counts; a symlink to a folder is not followed.
 - New, changed and removed files are picked up by rescanning every `SCAN_INTERVAL`. A file is only read once it has been left alone for two seconds, so copying or downloading into the folder is safe.
+- Soundscapes follow the folder, also while they play: a replaced file is loaded again, a deleted one fades out and its layer shows as missing (it keeps its level and comes back when the file does).
 - `GET /api/layers` returns what was found. If the folder becomes unreadable (an unmounted share, say) the last good list is kept rather than emptied.
 
 How I lay mine out (you can do it any way you like; only the first-level folder means anything to the program):
@@ -130,7 +131,7 @@ I am not a lawyer; the terms on each site are what counts. NOTICE.md and this RE
 
 Open `http://<host>:8007/`. The landing page is a card for each saved soundscape; a card opens its mixer. A mixer shows only the sounds in that soundscape, each with an on/off switch, a level slider and a ✕ to take it out of the soundscape (the file is not touched). The **Add** menu at the bottom lists the sounds that are not in it yet. Changes are applied as you make them and saved automatically; there is no Save button. **Listen** plays the stream in that browser tab (a browser buffers a second or more, so it lags your slider more than the server does). Rename, Duplicate and Delete are on the mixer, and the stream URL is there to copy. Several tabs stay in sync. It is green on black, like voidgrid-backup, and works on a phone.
 
-The page has no login (the plan is a trusted LAN or your own reverse proxy), and its scripts and styles are all served by the program itself.
+The page has no login (the plan is a trusted LAN or your own reverse proxy), and its scripts and styles are all served by the program itself. Changes are only accepted from the page itself: a request to change something that a browser sends from another website is refused (403), so a site you happen to have open cannot start your speakers. Home Assistant, scripts and `curl` are not affected. Behind a reverse proxy this works as it is over HTTPS; over plain HTTP the proxy must pass the `Host` header on unchanged or set `X-Forwarded-Host` (nginx: `proxy_set_header Host $host;`).
 
 ### Home Assistant
 
@@ -197,7 +198,6 @@ Planned, in rough order. None of it is promised.
 - The whole mix over MQTT, if there is a use for it.
 - Optional downloads from YouTube (yt-dlp).
 - Master volume and fades.
-- Noticing audio files that are deleted or replaced while a soundscape is playing.
 
 **Not planned:** login inside the app (put your own proxy in front), and watching the folder with inotify (rescanning works over network mounts).
 
@@ -208,7 +208,7 @@ You need Go 1.27 or newer, or just Docker.
 - `go vet ./... && go test -race ./...` builds, vets and tests everything.
 - `gofmt -l cmd internal` must print nothing.
 - `docker build -t voidgrid-soundscapes:dev .` builds the image (Go 1.27 builder, Alpine runtime with ffmpeg).
-- `scripts/integration.sh <image>` runs the image against a throwaway Mosquitto broker and a stub Home Assistant API (`scripts/stubha`): discovery, commands, play and stop, restart, last will. It never touches a real broker or Home Assistant.
+- `scripts/integration.sh <image>` runs the image against a throwaway Mosquitto broker and a stub Home Assistant API (`scripts/stubha`, built in `golang:1.27`, so the host needs no Go): discovery, commands, play and stop, restart, last will. It never touches a real broker or Home Assistant.
 - `scripts/lint.sh` runs the pinned golangci-lint in Docker; `pre-commit install` makes it (and gitleaks) run on every commit.
 - `scripts/smoke.sh <image>` boots an image the way it is meant to run (uid 1000, all capabilities dropped, read-only root) and checks it is healthy and that ffmpeg has the MP3 encoder.
 - The image build runs `gofmt`, `go vet` and `go test`, so a failing test fails the build. CI (on every push to `main` and every pull request) is just that build plus the smoke test.

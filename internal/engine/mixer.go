@@ -100,6 +100,30 @@ func (m *Mixer) Remove(id string) {
 	}
 }
 
+// Settle finishes every fade at once: gains jump to their targets, removed layers are forgotten and layers
+// that are off give their audio back. Render does the same gradually, but only runs while someone listens;
+// this is for when nobody does, so a click cannot be heard and memory is not held until the next listener.
+func (m *Mixer) Settle() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	kept := m.order[:0]
+	for _, v := range m.order {
+		v.gain = v.target
+		if v.removed {
+			delete(m.voices, m.keyOf(v))
+			continue
+		}
+		if v.target == 0 && v.dropWhenSilent {
+			v.loop, v.pos = nil, 0
+		}
+		kept = append(kept, v)
+	}
+	for i := len(kept); i < len(m.order); i++ {
+		m.order[i] = nil // let the forgotten voices' audio be collected
+	}
+	m.order = kept
+}
+
 // Audible returns how many layers are currently contributing sound.
 func (m *Mixer) Audible() int {
 	m.mu.Lock()
